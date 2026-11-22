@@ -97,9 +97,10 @@ SEED = 42
 # ============================================================
 POSITION_GROUPS = ["DB", "OL", "DL", "WR", "TE"]
 
-# 센서 글리치 임계값 (후보값)
-SPEED_GLITCH_YDS = 12.5        # yd/s 초과 프레임 제거
-ACCEL_GLITCH_YDS2 = 12.0       # yd/s² 초과 프레임 제거
+# 센서 글리치 기준 (Stage 3 확정, 근거: reports/eda.md 3.4, S3-1)
+SPEED_GLITCH_YDS = 12.5        # s 가 이 값 초과인 프레임 제거 (yd/s)
+ACCEL_GLITCH_YDS2 = 12.0       # a 가 이 값 초과이거나 음수인 프레임 제거 (a 는 크기값, 음수 = 오류)
+DECEL_GLITCH_YDS2 = 12.0       # |Δs/Δt| 가 이 값 초과인 프레임 쌍은 감속 계산에서 제외 (yd/s²)
 
 # 컴바인 트라이얼 특징
 MOTION_ONSET_SPEED = 0.5       # 움직임 시작 = 속도가 이 값을 처음 넘는 프레임
@@ -112,7 +113,8 @@ IFOREST_CONTAMINATION = 0.025  # Isolation Forest 이상치 비율
 # 경기 타깃
 MOVING_SPEED = 1.0             # g_s_mean_moving 계산 기준 (yd/s)
 TOP_K_PLAYS = 5                # g_smax_top5mean 의 K
-MIN_PLAYS_EXPOSURE = 50        # 미만이면 low_exposure 플래그
+TARGET_SEASON_TYPES = ["REG", "POST"]   # 주 타깃에 쓰는 경기 유형 (민감도 버전: PRE 포함)
+MIN_PLAYS_EXPOSURE = 20        # 루키 정규+포스트시즌 트래킹 플레이 수가 이 미만이면 low_exposure (Stage 3 확정: 348명)
 STARTER_TOP_FRACTION = 1 / 3   # 포지션 그룹 내 정규시즌 스냅 상위 비율
 TRACKING_CHUNKSIZE = 1_000_000  # 경기 트래킹 CSV chunk 크기(행)
 
