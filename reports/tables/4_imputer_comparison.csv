@@ -1,0 +1,4 @@
+target,imputer,n_train_eval,r2_overall_mean,r2_overall_std,r2_within_pos_mean,r2_within_pos_std,mae_mean
+g_smax_top5mean,group_median,273,0.7623,0.0422,0.0901,0.1017,0.5131
+g_smax_top5mean,knn,273,0.7669,0.0404,0.1046,0.1048,0.5057
+g_smax_top5mean,mice,273,0.7636,0.0424,0.0899,0.1055,0.5079
