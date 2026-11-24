@@ -15,6 +15,8 @@ Train 선수로만 `fit`한 뒤 Train/Valid/Test에 `transform`해서 만든다 
 - 루키 시즌은 `season == draft_year`로 정의한다 (D4).
 - 경기 트래킹 3개 파일은 `usecols`, `int32`/`float32`, `chunksize=1_000_000` 1회 스트리밍 패스로 처리한다.
 - 상대 기준 라벨의 기준값(평균·표준편차·분위수 컷)은 Train 선수만으로 계산한다.
+- 대표 속도 타깃은 플레이 n개 중 상위 5%(k = max(1, ceil(0.05·n)))의 최고속도 평균이다.
+  고정 K개(예: 상위 5개) 평균은 많이 뛸수록 운 좋은 값이 쌓여 저절로 커지므로(출전량 편향) 쓰지 않는다.
 """
 from __future__ import annotations
 
@@ -223,19 +225,29 @@ def stream_rookie_play_peaks(
 # =====================================================================
 # [데이터: 경기 단독] [단계: 타깃 생성 — ① 절대 폭발력 + ② 시즌 코호트 상대 우위]
 # =====================================================================
+def _top_percent_mean(s: pd.Series, percent: int = config.TOP_PERCENT_PLAYS) -> float:
+    """값 n개 중 상위 percent%(최소 1개)의 평균. k = ceil(n*percent/100)을 정수 연산으로 계산한다."""
+    v = np.sort(s.dropna().to_numpy(dtype=np.float64))[::-1]
+    n = len(v)
+    if n == 0:
+        return np.nan
+    k = max(1, (n * percent + 99) // 100)
+    return float(v[:k].mean())
+
+
 def _agg_athletic_slice(peaks_sub: pd.DataFrame, suffix: str = "") -> pd.DataFrame:
     """주어진 경기 유형 슬라이스(REG+POST 또는 ALL)에서 선수별 경기 운동학 타깃을 집계한다."""
     if len(peaks_sub) == 0:
         return pd.DataFrame(columns=["nfl_id"])
 
-    # 플레이별 최고속도 상위 K개 평균 (단일 최댓값 노이즈 방어)
-    top_k = (
-        peaks_sub.sort_values("s_max", ascending=False)
-        .groupby("nfl_id", sort=False)
-        .head(config.TOP_K_PLAYS)
-        .groupby("nfl_id")["s_max"]
-        .mean()
-        .rename(f"g_smax_top5mean{suffix}")
+    # 플레이별 최고속도 상위 5% 평균.
+    # 평균 낼 개수 k를 플레이 수 n에 비례시킨다(k = max(1, ceil(n*5/100))).
+    # 고정 K개 평균은 n이 클수록 운 좋은 값만 골라 커지지만, 비율로 정하면 많이 뛸수록
+    # 더 많은 플레이가 평균에 들어가 튄 값이 묽어진다 -> 출전량 편향을 줄인다.
+    top_pct = (
+        peaks_sub.groupby("nfl_id")["s_max"]
+        .apply(_top_percent_mean)
+        .rename(f"g_smax_top5pct_mean{suffix}")
     )
 
     grp = peaks_sub.groupby("nfl_id")
@@ -254,7 +266,7 @@ def _agg_athletic_slice(peaks_sub: pd.DataFrame, suffix: str = "") -> pd.DataFra
     agg = agg.drop(columns=["_s_mov_sum", "_n_mov"])
     if suffix:
         agg = agg.rename(columns={c: f"{c}{suffix}" for c in agg.columns if not c.endswith(suffix)})
-    out = agg.join(top_k, how="left").reset_index()
+    out = agg.join(top_pct, how="left").reset_index()
     return out
 
 
@@ -264,12 +276,12 @@ def _agg_athletic_slice(peaks_sub: pd.DataFrame, suffix: str = "") -> pd.DataFra
 #   510명 전체로 기준을 정하면 테스트 선수의 정답이 학습 라벨에 섞이므로(누수),
 #   기준값은 Train 선수만으로 fit 하고 Train/Valid/Test 에는 transform 만 적용한다.
 # =====================================================================
-RELATIVE_SPEED_COLS = ["g_smax_top5mean", "g_accel_tan_p99", "g_decel_tan_p99", "g_centripetal_p99"]
+RELATIVE_SPEED_COLS = ["g_smax_top5pct_mean", "g_accel_tan_p99", "g_decel_tan_p99", "g_centripetal_p99"]
 RELATIVE_SNAP_COL = "rookie_snaps_reg"
 _REL_SUFFIXES = ("_pos_pct", "_cohort_pct", "_cohort_z")
 _REL_SPECIAL = {
-    "is_explosive_speed_abs": "g_smax_top5mean",
-    "is_explosive_speed_cohort": "g_smax_top5mean",
+    "is_explosive_speed_abs": "g_smax_top5pct_mean",
+    "is_explosive_speed_cohort": "g_smax_top5pct_mean",
     "starter_flag": RELATIVE_SNAP_COL,
     "starter_flag_cohort": RELATIVE_SNAP_COL,
     "diag_draft_bust": RELATIVE_SNAP_COL,
@@ -421,8 +433,8 @@ class RelativeTargetEncoder:
 
         # 폭발적 신입 플래그 (상위 EXPLOSIVE_TOP_FRACTION, 기준은 Train 백분위)
         cut_pct = 1.0 - config.EXPLOSIVE_TOP_FRACTION
-        for name, src in (("is_explosive_speed_abs", "g_smax_top5mean_pos_pct"),
-                          ("is_explosive_speed_cohort", "g_smax_top5mean_cohort_pct")):
+        for name, src in (("is_explosive_speed_abs", "g_smax_top5pct_mean_pos_pct"),
+                          ("is_explosive_speed_cohort", "g_smax_top5pct_mean_cohort_pct")):
             if src in new_cols:
                 p = new_cols[src]
                 new_cols[name] = np.where(np.isfinite(p), (p >= cut_pct).astype(float), np.nan)
@@ -506,7 +518,7 @@ def build_rookie_athletic_targets(
     print(
         f"[확인된 결과] T3 루키 경기 운동능력 타깃 생성: {len(ath)}명 | "
         f"노출>={config.MIN_PLAYS_EXPOSURE} 충족={(~ath['low_exposure']).sum()}명 | "
-        f"REG+POST 최고속도 중앙={ath.loc[valid_expo, 'g_smax_top5mean'].median():.2f} yd/s"
+        f"REG+POST 상위5% 최고속도 중앙={ath.loc[valid_expo, 'g_smax_top5pct_mean'].median():.2f} yd/s"
     )
     return ath
 

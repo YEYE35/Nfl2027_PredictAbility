@@ -257,7 +257,8 @@ IFOREST_CONTAMINATION = 0.05   # Isolation Forest 이상치 비율
 
 # 경기 타깃 상수
 MOVING_SPEED = 1.0             # g_s_mean_moving 계산 기준 (yd/s)
-TOP_K_PLAYS = 5                # g_smax_top5mean 의 K
+TOP_PERCENT_PLAYS = 5          # g_smax_top5pct_mean: 플레이 n개 중 상위 5% (k = max(1, ceil(n*5/100)))의 최고속도 평균
+TOP_K_PLAYS = 5                # [구버전 정의] Stage 1 EDA 미리보기(01_eda_game) 전용. 정식 타깃에는 쓰지 않는다
 TARGET_SEASON_TYPES = ["REG", "POST"]   # 주 타깃 경기 유형 (민감도 버전: PRE 포함)
 MIN_PLAYS_EXPOSURE = 20        # 루키 REG+POST 트래킹 플레이 수 최소 노출 기준
 EXPOSURE_WEIGHT_K = 20.0       # 노출 신뢰도 가중치 w = n / (n + K)

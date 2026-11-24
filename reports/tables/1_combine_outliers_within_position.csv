@@ -1,9 +1,0 @@
-nfl_id,position,measure,value,z_within_pos
-55976,OL,combine_weight,374.0,4.896
-57356,DL,arm_length,36.875,3.543
-57362,DB,combine_weight,231.0,3.52
-58214,OL,ten_yd_split,1.96,3.201
-55976,OL,hand_size,11.625,3.192
-57408,OL,combine_weight,353.0,3.169
-57272,DB,combine_weight,227.0,3.126
-57337,OL,bench_reps,39.0,3.059

@@ -1,6 +1,0 @@
-combine_position,route_ran,target,rec_yards,yards_after_catch,expected_yards_after_catch,separation_at_pass_forward,cushion,pass_rushers_encountered,pressure_allowed,sack_allowed,time_to_pressure_allowed,peak_pressure_probability_allowed,player_get_off,time_to_pressure,time_to_qb_hurry,quick_pressure,unblocked_pressure,blitzing,sack,tackle,assist,tackle_for_loss,coverage_assignment
-DB,0.001,1.0,0.0,0.0,0.0,0.0,0.589,0.0,0.0,0.0,0.0,0.0,0.008,0.004,0.004,0.004,0.581,0.585,0.581,0.086,0.086,0.086,0.494
-OL,0.0,1.0,0.0,0.0,0.0,0.0,0.0,0.559,0.559,0.559,0.046,0.535,0.0,0.0,0.0,0.0,0.0,0.56,0.0,0.0,0.0,0.0,0.0
-DL,0.0,1.0,0.0,0.0,0.0,0.0,0.069,0.0,0.0,0.0,0.0,0.0,0.635,0.051,0.052,0.051,0.549,0.551,0.549,0.064,0.064,0.064,0.45
-WR,1.0,1.0,0.117,0.117,0.171,0.877,0.95,0.003,0.003,0.003,0.0,0.001,0.0,0.0,0.0,0.0,0.0,0.997,0.0,0.003,0.003,0.003,0.0
-TE,1.0,1.0,0.119,0.119,0.156,0.877,0.786,0.051,0.051,0.051,0.003,0.036,0.0,0.0,0.0,0.0,0.0,0.996,0.0,0.003,0.003,0.003,0.0

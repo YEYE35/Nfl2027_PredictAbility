@@ -100,7 +100,7 @@ $$v(t) = v_{\max}\left(1 - e^{-t/\tau}\right)$$
 - $P_{\max,\text{abs}} = \dfrac{1}{4}\, m_{\text{kg}}\, v_{\max}\, a_0 \cdot (0.9144)^2$ (SI 단위 Watts, 이론 최대 기계적 스프린트 파워)
 
 ### 3.3 도메인 물리 파생 & 드래프트 전 메타데이터
-- **`draft_age`**: 드래프트 기준일(`YYYY-04-28`) 대비 만 나이 (20.65~26.38세, 실제 ElasticNet/Lasso 최상위 생존 피처)
+- **`draft_age`**: 드래프트 기준일(`YYYY-04-28`) 대비 만 나이 (20.65~26.38세)
 - **`sub_position`**: 거친 5개 포지션 내부 교란(예: `DL` 안의 330 lb `NT/DT` vs 245 lb `DE/OLB`)을 분리하기 위해 8개 서브포지션(`EDGE`, `IDL`, `CB`, `S`, `OT`, `IOL`, `WR`, `TE`)으로 세분화
 - **물리 지수**:
   - $\text{BMI} = \dfrac{\text{weight}}{\text{height}^2} \times 703$, `wing_to_height`, `arm_to_height`, `hand_to_height`
@@ -128,7 +128,7 @@ $$v(t) = v_{\max}\left(1 - e^{-t/\tau}\right)$$
    - `build_preprocessor(mode="linear")`는 NaN 0건의 정규화 행렬을, `mode="tree"`는 추후 XGBoost/CatBoost용으로 원본 결측(`NaN`)을 네이티브 보존해 반환합니다.
 
 ### 3.5 견고한 타깃 및 포지션 내부 평가 지표 (`game_targets.py`, `preprocessing.py`)
-- **견고한 속도 타깃**: 단일 최댓값 노이즈를 피하기 위해 루키 `REG+POST` 상위 5개 플레이 평균(`g_smax_top5mean`)을 사용하고, 저노출 편향을 완화하기 위해 신뢰도 가중치 $w_i = \dfrac{n_i}{n_i + 20}$ 및 프리시즌 포함 민감도 버전(`_with_pre`)을 함께 저장합니다.
+- **견고한 속도 타깃 (`g_smax_top5pct_mean`)**: 루키 `REG+POST` 플레이 $n$개의 최고속도 중 **상위 5%** ($k = \max(1, \lceil 0.05\,n \rceil)$)의 평균입니다. 처음에는 고정 상위 5개 평균을 썼지만, 플레이가 많을수록 운 좋게 튄 값이 쌓여 저절로 커지는 출전량 편향이 컸습니다(Train 포지션 내 $\log n$과의 상관 0.73). 평균 낼 개수를 $n$에 비례시키면 많이 뛸수록 튄 값이 묽어져 상관이 0.12로 줄어듭니다. 여기에 저노출 편향을 완화하기 위해 신뢰도 가중치 $w_i = \dfrac{n_i}{n_i + 20}$ 및 프리시즌 포함 민감도 버전(`_with_pre`)을 함께 저장합니다.
 - **상대 타깃 (`RelativeTargetEncoder`, Train 전용 `fit`)**: 아래 라벨은 저장하지 않고, `fit(train)`이 학습한 기준으로 `transform`해서 만듭니다.
   - `{col}_pos_pct`, `{col}_cohort_pct`: Train 참조분포 안에서의 평균 순위 백분위 $\big((lo + hi + 1)/2\big)/n$. Train 선수 자신에게는 기존 `rank(pct=True)`와 같은 값이 나옵니다.
   - `{col}_cohort_z` $= (x - \mu_{\text{coh}}) / \sigma_{\text{coh}}$ ($\mu, \sigma$는 Train 코호트 통계). 코호트 표본이 5명 미만이면 포지션 통계로 대체합니다.
@@ -154,34 +154,34 @@ $$v(t) = v_{\max}\left(1 - e^{-t/\tau}\right)$$
 ### 4.1 피처 세트 (기준 `FS-Trad`)
 | 타깃 | 피처 세트 | 전체 $R^2$ | 포지션 내부 $R^2$ (평균 ± 표준편차) | Δ vs FS-Trad | 보정 SE | 승수 | 판정 |
 |---|---|---:|---:|---:|---:|---:|---|
-| 절대 (`g_smax_top5mean`) | `FS-Trad` (전통 12개) | 0.7542 | 0.0483 ± 0.0811 | — | — | — | 기준 |
-| 절대 (`g_smax_top5mean`) | `FS-Phys` (+물리·나이·결측플래그) | 0.7582 | 0.0654 ± 0.1041 | +0.0171 | 0.0295 | 19/25 | 차이 없음 |
-| 절대 (`g_smax_top5mean`) | `FS-Biomech` (+3축·F-V·스킬구제·드릴Z) | 0.7623 | 0.0901 ± 0.1017 | +0.0418 | 0.0265 | 19/25 | 차이 없음 |
-| 절대 (`g_smax_top5mean`) | `FS-Full` (+NFL NGS 점수) | 0.7710 | 0.1183 ± 0.1088 | +0.0700 | 0.0415 | 21/25 | 차이 없음 |
-| 코호트 상대 (`g_smax_top5mean_cohort_z`) | `FS-Trad` | 0.0527 | 0.0647 ± 0.0400 | — | — | — | 기준 |
-| 코호트 상대 | `FS-Phys` | 0.0647 | 0.0748 ± 0.0517 | +0.0102 | 0.0155 | 19/25 | 차이 없음 |
-| 코호트 상대 | `FS-Biomech` | 0.0704 | 0.0822 ± 0.0642 | +0.0175 | 0.0176 | 22/25 | 차이 없음 |
-| 코호트 상대 | `FS-Full` | 0.1075 | 0.1195 ± 0.0781 | +0.0548 | 0.0282 | 22/25 | 차이 없음 |
+| 절대 (`g_smax_top5pct_mean`) | `FS-Trad` (전통 12개) | 0.9220 | 0.1780 ± 0.1369 | — | — | — | 기준 |
+| 절대 (`g_smax_top5pct_mean`) | `FS-Phys` (+물리·나이·결측플래그) | 0.9159 | 0.1176 ± 0.1553 | −0.0604 | 0.0246 | 1/25 | 열위 |
+| 절대 (`g_smax_top5pct_mean`) | `FS-Biomech` (+3축·F-V·스킬구제·드릴Z) | 0.9137 | 0.1112 ± 0.1590 | −0.0669 | 0.0419 | 3/25 | 차이 없음 |
+| 절대 (`g_smax_top5pct_mean`) | `FS-Full` (+NFL NGS 점수) | 0.9128 | 0.1001 ± 0.1623 | −0.0780 | 0.0458 | 3/25 | 차이 없음 |
+| 코호트 상대 (`g_smax_top5pct_mean_cohort_z`) | `FS-Trad` | 0.1163 | 0.1362 ± 0.0600 | — | — | — | 기준 |
+| 코호트 상대 | `FS-Phys` | 0.1102 | 0.1298 ± 0.0646 | −0.0064 | 0.0122 | 10/25 | 차이 없음 |
+| 코호트 상대 | `FS-Biomech` | 0.1003 | 0.1229 ± 0.0802 | −0.0134 | 0.0252 | 8/25 | 차이 없음 |
+| 코호트 상대 | `FS-Full` | 0.1003 | 0.1228 ± 0.0799 | −0.0134 | 0.0262 | 8/25 | 차이 없음 |
 
-- 피처를 더할수록 평균은 올라가고 대부분의 폴드(19~22/25)에서 기준보다 높습니다. **방향은 일관되지만, 어느 것도 보정 SE의 2배를 넘지 못했습니다.** 이 표본(273명)으로는 "새 피처가 확실히 낫다"고 말할 수 없고, "개선 방향의 신호가 있다" 정도로만 해석합니다.
-- 포지션 내부 $R^2$ 자체가 0.05~0.12로 낮고, 폴드 간 표준편차가 평균과 비슷한 크기입니다. 전체 $R^2$(0.75~0.77)는 대부분 포지션 간 체격 차이에서 나옵니다.
-- 코호트 상대 타깃은 이제 폴드마다 Train 폴드 기준으로 라벨을 만들기 때문에, 510명 전체 기준으로 만들던 이전 버전(FS-Trad 0.0736, FS-Full 0.1294)보다 수치가 조금 낮습니다. 이전 수치에는 검증 폴드 정보가 라벨에 섞여 있었습니다.
+- **피처를 더해도 나아지지 않았습니다.** 절대 타깃에서는 전통 12개(`FS-Trad`)가 가장 높고, `FS-Phys`는 25개 폴드 중 24개에서 졌습니다(`열위`). 나머지는 평균이 더 낮지만 보정 SE 2배 안이라 `차이 없음`입니다.
+- 이전 타깃(고정 상위 5개 평균)에서는 피처를 더할수록 평균이 올라가는 것처럼 보였습니다(FS-Trad 0.048 → FS-Full 0.118). 그 상승분의 상당 부분은 타깃에 섞인 **출전량(≈지명 순위)**을 맞힌 몫이었던 것으로 보입니다. 예를 들어 이전 최상위 피처였던 `draft_age`는 포지션 안에서 플레이 수와 상관이 있습니다(어릴수록 많이 뜀, r = −0.22). 출전량 편향을 줄이자 그 효과가 사라졌습니다.
+- 지금 표본(273명)에서는 피처 100여 개를 Ridge에 넣으면 신호보다 노이즈가 늘어납니다. 모델링 단계에서는 `FS-Trad`를 기준 모델로 두고, 추가 피처는 선별해서 넣는 편이 안전합니다.
 
-### 4.2 결측 대치 · 스케일러 (`FS-Biomech`, `g_smax_top5mean`)
+### 4.2 결측 대치 · 스케일러 (`FS-Biomech`, `g_smax_top5pct_mean`)
 | 비교 | 후보 | 포지션 내부 $R^2$ | Δ vs 기준 | 보정 SE | 승수 | 판정 |
 |---|---|---:|---:|---:|---:|---|
-| 결측 대치 | `group_median` | 0.0901 | — | — | — | 기준 |
-| 결측 대치 | `knn` | 0.1046 | +0.0145 | 0.0138 | 20/25 | 차이 없음 |
-| 결측 대치 | `mice` | 0.0899 | −0.0002 | 0.0141 | 13/25 | 차이 없음 |
-| 스케일러 | `robust` | 0.0901 | — | — | — | 기준 |
-| 스케일러 | `standard` | 0.1034 | +0.0133 | 0.0112 | 19/25 | 차이 없음 |
-| 스케일러 | `yeo_johnson` | 0.1094 | +0.0193 | 0.0145 | 20/25 | 차이 없음 |
+| 결측 대치 | `group_median` | 0.1112 | — | — | — | 기준 |
+| 결측 대치 | `knn` | 0.1131 | +0.0019 | 0.0139 | 12/25 | 차이 없음 |
+| 결측 대치 | `mice` | 0.0924 | −0.0188 | 0.0243 | 8/25 | 차이 없음 |
+| 스케일러 | `robust` | 0.1112 | — | — | — | 기준 |
+| 스케일러 | `standard` | 0.1186 | +0.0075 | 0.0155 | 15/25 | 차이 없음 |
+| 스케일러 | `yeo_johnson` | 0.1239 | +0.0127 | 0.0214 | 16/25 | 차이 없음 |
 
-- 세 대치법, 세 스케일러 사이에 **판정할 만한 차이가 없습니다.** 따라서 "최선"을 고르지 않고, `build_preprocessor()`의 선형 모드 기본값인 가장 단순한 조합(`group_median` + `robust`)을 기준으로 유지합니다. `knn`·`yeo_johnson`은 평균이 약간 높으므로 모델링 단계에서 후보로 남겨 둘 수 있습니다.
+- 세 대치법, 세 스케일러 사이에 **판정할 만한 차이가 없습니다.** 따라서 `build_preprocessor()`의 선형 모드 기본값인 가장 단순한 조합(`group_median` + `robust`)을 유지합니다.
 
-### 4.3 PCA / 정규화 점검 (`FS-Biomech`, Train 273명, 타깃 `g_smax_top5mean_cohort_z`)
+### 4.3 PCA / 정규화 점검 (`FS-Biomech`, Train 273명, 타깃 `g_smax_top5pct_mean_cohort_z`)
 - 총 107개 피처(이상치 점수 포함) 중 PC 13개로 80%, PC 20개로 90% 분산을 설명합니다.
-- Lasso는 8개, ElasticNet은 25개 피처를 남겼습니다. ElasticNet 계수 크기 상위는 `draft_age`, `drill_z_composite`, `zcoh_skill_smax_max`, `zcoh_ten_yd_split`, `zpos_skill_smax_max`, `zpos_forty`, `speed_score` 순입니다 (`4_top30_enet_lasso_features.csv`).
+- Lasso는 6개, ElasticNet은 9개 피처만 남겼습니다. ElasticNet 계수 크기 상위는 `zpos_combine_weight`(−), `zcoh_forty`(−), `zcoh_combine_weight`(−), `zpos_forty`(−), `zcoh_comb_any_smax_max`(+), `zpos_skill_smax_max`(+) 순입니다 (`4_top30_enet_lasso_features.csv`). "같은 포지션 안에서 가볍고 40야드가 빠르고 드릴 최고속도가 높을수록 경기에서 빠르다"는 물리적으로 자연스러운 방향입니다.
 - Lasso는 서로 상관된 피처 중 하나만 남기는 경향이 있어, "살아남음 = 중요함"으로 해석하지 않습니다. 탐색용 참고 자료입니다.
 
 ---
@@ -241,7 +241,7 @@ prep_tree = build_preprocessor(
 # 상대 타깃(백분위·코호트 Z·폭발/주전 플래그)은 Train에서만 기준을 학습
 from src.features.game_targets import RelativeTargetEncoder
 enc = RelativeTargetEncoder().fit(train_df)
-train_y = enc.transform(train_df)["g_smax_top5mean_cohort_z"]
-test_y = enc.transform(test_df)["g_smax_top5mean_cohort_z"]
+train_y = enc.transform(train_df)["g_smax_top5pct_mean_cohort_z"]
+test_y = enc.transform(test_df)["g_smax_top5pct_mean_cohort_z"]
 # CV 안에서는 폴드마다 Train 폴드로 다시 fit 할 것 (preprocessing._relative_or_raw_target 참고)
 ```

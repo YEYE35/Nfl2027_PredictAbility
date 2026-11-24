@@ -602,7 +602,7 @@ def evaluate_pipeline_cv(
 ) -> dict:
     """Train 데이터 내부에서 5×5 Repeated Stratified CV로 RidgeCV 성능을 평가한다.
 
-    - 상대 기준 타깃(예: `g_smax_top5mean_cohort_z`)은 fold마다 학습 fold로만 기준을 fit 한다.
+    - 상대 기준 타깃(예: `g_smax_top5pct_mean_cohort_z`)은 fold마다 학습 fold로만 기준을 fit 한다.
     - 반환값에는 요약(평균·표준편차)과 함께 fold별 점수 배열(`*_folds`)이 들어 있어,
       설정끼리 같은 fold 점수를 짝지어 비교할 수 있다.
     """
@@ -742,7 +742,7 @@ def _run_comparison(
 def compare_imputers_cv(
     train_df: pd.DataFrame,
     trials_df: pd.DataFrame,
-    target_col: str = "g_smax_top5mean",
+    target_col: str = "g_smax_top5pct_mean",
 ) -> pd.DataFrame:
     """[단계: 결측 방식 비교] group_median(기준) vs knn vs mice — 같은 25개 fold 짝지은 비교."""
     configs = {
@@ -759,7 +759,7 @@ def compare_imputers_cv(
 def compare_scalers_cv(
     train_df: pd.DataFrame,
     trials_df: pd.DataFrame,
-    target_col: str = "g_smax_top5mean",
+    target_col: str = "g_smax_top5pct_mean",
     imputer: str = "group_median",
 ) -> pd.DataFrame:
     """[단계: 스케일링 비교] robust(기준) vs standard vs yeo_johnson — 같은 25개 fold 짝지은 비교."""
@@ -777,7 +777,7 @@ def compare_scalers_cv(
 def compare_feature_sets_cv(
     train_df: pd.DataFrame,
     trials_df: pd.DataFrame,
-    targets: tuple[str, ...] = ("g_smax_top5mean", "g_smax_top5mean_cohort_z"),
+    targets: tuple[str, ...] = ("g_smax_top5pct_mean", "g_smax_top5pct_mean_cohort_z"),
 ) -> pd.DataFrame:
     """[단계: 피처 세트 비교] 타깃마다 FS-Trad(기준) → FS-Full 짝지은 비교.
 
@@ -804,7 +804,7 @@ def compare_feature_sets_cv(
 def inspect_pca_and_lasso(
     train_df: pd.DataFrame,
     trials_df: pd.DataFrame,
-    target_col: str = "g_smax_top5mean_cohort_z",
+    target_col: str = "g_smax_top5pct_mean_cohort_z",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """[단계: 차원·피처 점검] 이미 배운 PCA 설명분산 및 Lasso/ElasticNet 생존 피처를 확인한다.
 
