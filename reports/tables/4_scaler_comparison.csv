@@ -1,4 +1,4 @@
-target,scaler,n_train_eval,r2_overall_mean,r2_overall_std,r2_within_pos_mean,r2_within_pos_std,mae_mean
-g_smax_top5mean,standard,273,0.7665,0.0413,0.1034,0.1012,0.509
-g_smax_top5mean,robust,273,0.7623,0.0422,0.0901,0.1017,0.5131
-g_smax_top5mean,yeo_johnson,273,0.7678,0.0433,0.1087,0.1057,0.505
+target,scaler,n_train_eval,r2_overall_mean,r2_overall_std,r2_within_pos_mean,r2_within_pos_std,mae_mean,delta_mean,delta_std,wins,delta_se_corrected,verdict
+g_smax_top5mean,robust,273,0.7623,0.0422,0.0901,0.1017,0.5131,0.0,0.0,-,0.0,기준
+g_smax_top5mean,standard,273,0.7665,0.0413,0.1034,0.1012,0.509,0.0133,0.0208,19/25,0.0112,차이 없음
+g_smax_top5mean,yeo_johnson,273,0.768,0.0433,0.1094,0.1056,0.505,0.0193,0.0268,20/25,0.0145,차이 없음

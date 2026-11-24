@@ -1,4 +1,4 @@
-target,imputer,n_train_eval,r2_overall_mean,r2_overall_std,r2_within_pos_mean,r2_within_pos_std,mae_mean
-g_smax_top5mean,group_median,273,0.7623,0.0422,0.0901,0.1017,0.5131
-g_smax_top5mean,knn,273,0.7669,0.0404,0.1046,0.1048,0.5057
-g_smax_top5mean,mice,273,0.7636,0.0424,0.0899,0.1055,0.5079
+target,imputer,n_train_eval,r2_overall_mean,r2_overall_std,r2_within_pos_mean,r2_within_pos_std,mae_mean,delta_mean,delta_std,wins,delta_se_corrected,verdict
+g_smax_top5mean,group_median,273,0.7623,0.0422,0.0901,0.1017,0.5131,0.0,0.0,-,0.0,기준
+g_smax_top5mean,knn,273,0.7669,0.0404,0.1046,0.1048,0.5057,0.0145,0.0256,20/25,0.0138,차이 없음
+g_smax_top5mean,mice,273,0.7636,0.0424,0.0899,0.1055,0.5079,-0.0002,0.0261,13/25,0.0141,차이 없음

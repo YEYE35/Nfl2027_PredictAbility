@@ -14,10 +14,13 @@
    - 스케일링 방식 비교: `standard` vs `robust` vs `yeo_johnson`
    - 피처 세트 비교: `FS-Trad` vs `FS-Phys` vs `FS-Biomech` vs `FS-Full`
    - PCA 설명분산 & Lasso/ElasticNet 생존 피처 점검
+   - 모든 비교는 같은 25개 fold의 점수를 짝지어(paired) 기준 설정 대비 차이와 보정 표준오차로 판정
 
 절대 준수 규칙:
 - `draft_round`, `draft_overall_pick`, `draft_tier`는 입력 피처 X에 절대 포함하지 않는다.
 - 모든 Transformer는 CV 폴드의 Train 데이터에서만 `fit`하고 Validation/Test에는 `transform`만 수행한다.
+- 상대 기준 타깃(`*_cohort_z`, `*_pct`, `starter_flag` 등)도 같은 원칙: `RelativeTargetEncoder`를
+  CV에서는 학습 fold로, 최종 평가에서는 Train 408명으로만 fit 한다.
 """
 from __future__ import annotations
 
@@ -38,6 +41,11 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, PowerTransformer, RobustScaler, StandardScaler
 
 from src import config
+from src.features.game_targets import (
+    RelativeTargetEncoder,
+    check_relative_labels_ignore_holdout,
+    relative_label_base,
+)
 
 # =====================================================================
 # [데이터: 컴바인+경기 통합] [단계: 피처 세트 정의] 드래프트 결과 컬럼 원천 차단
@@ -574,19 +582,36 @@ def _within_group_r2(y_true: np.ndarray, y_pred: np.ndarray, groups: np.ndarray)
     return float(r2_score(y_res, p_res))
 
 
+def _relative_or_raw_target(
+    X_fit: pd.DataFrame,
+    frames: list[pd.DataFrame],
+    target_col: str,
+) -> list[np.ndarray]:
+    """원본 타깃이면 그대로, 상대 기준 타깃이면 X_fit(학습 데이터)으로만 기준을 잡아 각 frame의 라벨을 만든다."""
+    if relative_label_base(target_col) is None:
+        return [f[target_col].to_numpy(dtype=np.float64) for f in frames]
+    enc = RelativeTargetEncoder().fit(X_fit)
+    return [enc.transform(f)[target_col].to_numpy(dtype=np.float64) for f in frames]
+
+
 def evaluate_pipeline_cv(
     train_df: pd.DataFrame,
     target_col: str,
     preprocessor_kwargs: dict,
     min_exposure_only: bool = True,
-) -> dict[str, float]:
-    """Train 데이터 내부에서 5×5 Repeated Stratified CV로 RidgeCV 성능을 평가한다."""
-    sub = train_df[train_df[target_col].notna()].copy()
+) -> dict:
+    """Train 데이터 내부에서 5×5 Repeated Stratified CV로 RidgeCV 성능을 평가한다.
+
+    - 상대 기준 타깃(예: `g_smax_top5mean_cohort_z`)은 fold마다 학습 fold로만 기준을 fit 한다.
+    - 반환값에는 요약(평균·표준편차)과 함께 fold별 점수 배열(`*_folds`)이 들어 있어,
+      설정끼리 같은 fold 점수를 짝지어 비교할 수 있다.
+    """
+    base_col = relative_label_base(target_col) or target_col
+    sub = train_df[train_df[base_col].notna()].copy()
     if min_exposure_only and "low_exposure" in sub.columns:
         sub = sub[~sub["low_exposure"]].copy()
     sub = sub.reset_index(drop=True)
 
-    y = sub[target_col].to_numpy(dtype=np.float64)
     pos = sub["combine_position"].to_numpy()
     rskf = RepeatedStratifiedKFold(
         n_splits=config.CV_N_SPLITS,
@@ -599,7 +624,10 @@ def evaluate_pipeline_cv(
 
     for tr_idx, va_idx in rskf.split(sub, pos):
         X_tr, X_va = sub.iloc[tr_idx], sub.iloc[va_idx]
-        y_tr, y_va = y[tr_idx], y[va_idx]
+        y_tr, y_va = _relative_or_raw_target(X_tr, [X_tr, X_va], target_col)
+        keep_tr, keep_va = np.isfinite(y_tr), np.isfinite(y_va)
+        X_tr, y_tr = X_tr[keep_tr], y_tr[keep_tr]
+        X_va, y_va = X_va[keep_va], y_va[keep_va]
 
         pipe = Pipeline([
             ("prep", build_preprocessor(**preprocessor_kwargs)),
@@ -609,7 +637,7 @@ def evaluate_pipeline_cv(
         pred = pipe.predict(X_va)
 
         r2_all_list.append(r2_score(y_va, pred))
-        r2_within_list.append(_within_group_r2(y_va, pred, pos[va_idx]))
+        r2_within_list.append(_within_group_r2(y_va, pred, X_va["combine_position"].to_numpy()))
         mae_list.append(mean_absolute_error(y_va, pred))
 
     return {
@@ -619,7 +647,96 @@ def evaluate_pipeline_cv(
         "r2_within_pos_mean": round(float(np.mean(r2_within_list)), 4),
         "r2_within_pos_std": round(float(np.std(r2_within_list)), 4),
         "mae_mean": round(float(np.mean(mae_list)), 4),
+        "r2_overall_folds": np.asarray(r2_all_list),
+        "r2_within_pos_folds": np.asarray(r2_within_list),
+        "mae_folds": np.asarray(mae_list),
     }
+
+
+# =====================================================================
+# [단계: 비교 판정] 같은 fold 점수를 짝지은 비교 (Nadeau–Bengio 보정 표준오차)
+#   - fold마다 d_i = 점수_i(후보) − 점수_i(기준) 을 계산하면 fold 난이도 차이가 상쇄된다.
+#   - 반복 k-fold는 fold끼리 학습 데이터가 겹쳐 단순 표준오차가 과소추정되므로
+#     보정 분산 (1/J + n_test/n_train) × var(d) 를 쓴다. (J = fold 수 25, n_test/n_train = 1/4)
+#   - 판정: delta_mean > 2 × SE → "우위", < −2 × SE → "열위", 그 외 → "차이 없음"
+# =====================================================================
+_FOLD_KEYS = ("r2_overall_folds", "r2_within_pos_folds", "mae_folds")
+
+
+def _paired_vs_baseline(
+    results: dict[str, dict],
+    baseline: str,
+    metric: str = "r2_within_pos_folds",
+) -> dict[str, dict]:
+    """설정별 fold 점수를 기준 설정과 짝지어 차이 통계를 계산한다."""
+    k = config.CV_N_SPLITS
+    test_train_ratio = 1.0 / (k - 1)
+    base = results[baseline][metric]
+    out = {}
+    for name, res in results.items():
+        d = res[metric] - base
+        n = len(d)
+        if name == baseline:
+            out[name] = {"delta_mean": 0.0, "delta_std": 0.0, "wins": "-",
+                         "delta_se_corrected": 0.0, "verdict": "기준"}
+            continue
+        var_d = float(np.var(d, ddof=1))
+        se = float(np.sqrt((1.0 / n + test_train_ratio) * var_d))
+        dm = float(np.mean(d))
+        if dm > 2 * se:
+            verdict = "우위"
+        elif dm < -2 * se:
+            verdict = "열위"
+        else:
+            verdict = "차이 없음"
+        out[name] = {
+            "delta_mean": round(dm, 4),
+            "delta_std": round(float(np.std(d, ddof=1)), 4),
+            "wins": f"{int((d > 0).sum())}/{n}",
+            "delta_se_corrected": round(se, 4),
+            "verdict": verdict,
+        }
+    return out
+
+
+def _fold_scores_long(comparison: str, target: str, config_name: str, res: dict) -> pd.DataFrame:
+    """fold별 점수를 long format으로 변환한다 (보고서 박스플롯용)."""
+    n = len(res["r2_within_pos_folds"])
+    idx = np.arange(n)
+    return pd.DataFrame({
+        "comparison": comparison,
+        "target": target,
+        "config": config_name,
+        "repeat": idx // config.CV_N_SPLITS,
+        "fold": idx % config.CV_N_SPLITS,
+        "r2_overall": res["r2_overall_folds"],
+        "r2_within_pos": res["r2_within_pos_folds"],
+        "mae": res["mae_folds"],
+    })
+
+
+def _run_comparison(
+    comparison: str,
+    target_col: str,
+    configs: dict[str, dict],
+    baseline: str,
+    train_df: pd.DataFrame,
+    label_col: str,
+) -> pd.DataFrame:
+    """여러 전처리 설정을 같은 fold로 평가하고, 기준 대비 짝지은 비교 열을 붙인 표를 반환한다.
+
+    반환 DataFrame의 `attrs["fold_scores"]`에 fold별 원점수(long format)가 들어 있다.
+    """
+    results = {name: evaluate_pipeline_cv(train_df, target_col, kw) for name, kw in configs.items()}
+    paired = _paired_vs_baseline(results, baseline)
+    rows, folds = [], []
+    for name, res in results.items():
+        summary = {k: v for k, v in res.items() if k not in _FOLD_KEYS}
+        rows.append({"target": target_col, label_col: name, **summary, **paired[name]})
+        folds.append(_fold_scores_long(comparison, target_col, name, res))
+    df_res = pd.DataFrame(rows)
+    df_res.attrs["fold_scores"] = pd.concat(folds, ignore_index=True)
+    return df_res
 
 
 def compare_imputers_cv(
@@ -627,20 +744,14 @@ def compare_imputers_cv(
     trials_df: pd.DataFrame,
     target_col: str = "g_smax_top5mean",
 ) -> pd.DataFrame:
-    """[단계: 결측 방식 비교] group_median vs knn vs mice (동일 Ridge 5×5 CV)."""
-    rows = []
-    for imp in ("group_median", "knn", "mice"):
-        res = evaluate_pipeline_cv(
-            train_df,
-            target_col=target_col,
-            preprocessor_kwargs=dict(
-                feature_set="FS-Biomech", mode="linear", imputer=imp,
-                scaler="robust", trials_df=trials_df,
-            ),
-        )
-        rows.append({"target": target_col, "imputer": imp, **res})
-    df_res = pd.DataFrame(rows)
-    print("[확인된 결과] 결측치 처리 방식 비교 (5×5 CV, Ridge):")
+    """[단계: 결측 방식 비교] group_median(기준) vs knn vs mice — 같은 25개 fold 짝지은 비교."""
+    configs = {
+        imp: dict(feature_set="FS-Biomech", mode="linear", imputer=imp,
+                  scaler="robust", trials_df=trials_df)
+        for imp in ("group_median", "knn", "mice")
+    }
+    df_res = _run_comparison("imputer", target_col, configs, "group_median", train_df, "imputer")
+    print("[확인된 결과] 결측치 처리 방식 비교 (5×5 CV, Ridge, 기준=group_median):")
     print(df_res.to_string(index=False))
     return df_res
 
@@ -651,20 +762,14 @@ def compare_scalers_cv(
     target_col: str = "g_smax_top5mean",
     imputer: str = "group_median",
 ) -> pd.DataFrame:
-    """[단계: 스케일링 비교] standard vs robust vs yeo_johnson (동일 Ridge 5×5 CV)."""
-    rows = []
-    for sc in ("standard", "robust", "yeo_johnson"):
-        res = evaluate_pipeline_cv(
-            train_df,
-            target_col=target_col,
-            preprocessor_kwargs=dict(
-                feature_set="FS-Biomech", mode="linear", imputer=imputer,
-                scaler=sc, trials_df=trials_df,
-            ),
-        )
-        rows.append({"target": target_col, "scaler": sc, **res})
-    df_res = pd.DataFrame(rows)
-    print("[확인된 결과] 스케일링·분포변환 비교 (5×5 CV, Ridge):")
+    """[단계: 스케일링 비교] robust(기준) vs standard vs yeo_johnson — 같은 25개 fold 짝지은 비교."""
+    configs = {
+        sc: dict(feature_set="FS-Biomech", mode="linear", imputer=imputer,
+                 scaler=sc, trials_df=trials_df)
+        for sc in ("robust", "standard", "yeo_johnson")
+    }
+    df_res = _run_comparison("scaler", target_col, configs, "robust", train_df, "scaler")
+    print("[확인된 결과] 스케일링·분포변환 비교 (5×5 CV, Ridge, 기준=robust):")
     print(df_res.to_string(index=False))
     return df_res
 
@@ -674,21 +779,24 @@ def compare_feature_sets_cv(
     trials_df: pd.DataFrame,
     targets: tuple[str, ...] = ("g_smax_top5mean", "g_smax_top5mean_cohort_z"),
 ) -> pd.DataFrame:
-    """[단계: 피처 세트 비교] 절대 타깃 & 시즌 코호트 상대 타깃에서 FS-Trad -> FS-Full 점진 비교."""
-    rows = []
+    """[단계: 피처 세트 비교] 타깃마다 FS-Trad(기준) → FS-Full 짝지은 비교.
+
+    코호트 상대 타깃은 fold마다 학습 fold로만 기준을 잡는다 (evaluate_pipeline_cv 참고).
+    """
+    tables = []
     for tgt in targets:
-        for fs in ("FS-Trad", "FS-Phys", "FS-Biomech", "FS-Full"):
-            res = evaluate_pipeline_cv(
-                train_df,
-                target_col=tgt,
-                preprocessor_kwargs=dict(
-                    feature_set=fs, mode="linear", imputer="group_median",
-                    scaler="robust", trials_df=trials_df,
-                ),
-            )
-            rows.append({"target": tgt, "feature_set": fs, **res})
-    df_res = pd.DataFrame(rows)
-    print("[확인된 결과] 피처 세트별 성능 비교 (절대 타깃 vs 시즌 코호트 상대 타깃):")
+        configs = {
+            fs: dict(feature_set=fs, mode="linear", imputer="group_median",
+                     scaler="robust", trials_df=trials_df)
+            for fs in ("FS-Trad", "FS-Phys", "FS-Biomech", "FS-Full")
+        }
+        tables.append(_run_comparison("feature_set", tgt, configs, "FS-Trad", train_df, "feature_set"))
+    fold_scores = pd.concat([t.attrs["fold_scores"] for t in tables], ignore_index=True)
+    for t in tables:
+        t.attrs = {}  # attrs 안의 DataFrame 때문에 pd.concat 이 attrs 비교에서 실패하지 않도록 비운다
+    df_res = pd.concat(tables, ignore_index=True)
+    df_res.attrs["fold_scores"] = fold_scores
+    print("[확인된 결과] 피처 세트별 성능 비교 (기준=FS-Trad, 절대 타깃 vs 시즌 코호트 상대 타깃):")
     print(df_res.to_string(index=False))
     return df_res
 
@@ -698,9 +806,15 @@ def inspect_pca_and_lasso(
     trials_df: pd.DataFrame,
     target_col: str = "g_smax_top5mean_cohort_z",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """[단계: 차원·피처 점검] 이미 배운 PCA 설명분산 및 Lasso/ElasticNet 생존 피처를 확인한다."""
-    sub = train_df[train_df[target_col].notna() & (~train_df["low_exposure"])].reset_index(drop=True)
-    y = sub[target_col].to_numpy(dtype=np.float64)
+    """[단계: 차원·피처 점검] 이미 배운 PCA 설명분산 및 Lasso/ElasticNet 생존 피처를 확인한다.
+
+    상대 기준 타깃이면 Train 데이터로만 기준을 잡아 라벨을 만든다 (테스트셋 미사용).
+    """
+    base_col = relative_label_base(target_col) or target_col
+    sub = train_df[train_df[base_col].notna() & (~train_df["low_exposure"])].reset_index(drop=True)
+    (y,) = _relative_or_raw_target(sub, [sub], target_col)
+    keep = np.isfinite(y)
+    sub, y = sub[keep].reset_index(drop=True), y[keep]
 
     prep = build_preprocessor(
         feature_set="FS-Biomech", mode="linear", imputer="group_median",
@@ -750,7 +864,11 @@ def run_stage4(save_tables: bool = True) -> dict[str, pd.DataFrame]:
     train_df, test_df = create_or_load_test_split(master, overwrite=False)
     trials = pd.read_parquet(config.PROCESSED_FILES["combine_trials"])
 
-    # 누수 무결성 검증: Train fit -> Test transform 시 NaN/Inf 0건 & Test 교란이 Train 통계에 무영향
+    # 타깃 누수 검증: 테스트 선수의 원본 타깃을 섞어도 Train 상대 라벨이 바뀌지 않아야 한다
+    check_relative_labels_ignore_holdout(train_df, test_df)
+    print("[확인된 결과] 상대 기준 타깃 교란 테스트 통과: 테스트 정답을 바꿔도 Train 라벨 불변")
+
+    # 피처 누수 무결성 검증: Train fit -> Test transform 시 NaN/Inf 0건
     prep_lin = build_preprocessor(
         feature_set="FS-Biomech", mode="linear", imputer="group_median",
         scaler="robust", trials_df=trials, add_iso_score=True,
@@ -780,7 +898,11 @@ def run_stage4(save_tables: bool = True) -> dict[str, pd.DataFrame]:
         sc_tbl.to_csv(config.TABLES_DIR / "4_scaler_comparison.csv", index=False)
         fs_tbl.to_csv(config.TABLES_DIR / "4_feature_set_comparison.csv", index=False)
         coef_tbl.head(30).to_csv(config.TABLES_DIR / "4_top30_enet_lasso_features.csv", index=False)
-        print("[확인된 결과] Stage 4 비교표 4종 저장 완료 -> reports/tables/")
+        fold_scores = pd.concat(
+            [t.attrs["fold_scores"] for t in (imp_tbl, sc_tbl, fs_tbl)], ignore_index=True
+        )
+        fold_scores.to_csv(config.TABLES_DIR / "4_cv_fold_scores.csv", index=False)
+        print("[확인된 결과] Stage 4 비교표 5종 저장 완료 (fold별 원점수 4_cv_fold_scores.csv 포함) -> reports/tables/")
 
     return {
         "master": master,

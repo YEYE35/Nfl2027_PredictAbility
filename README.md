@@ -11,6 +11,8 @@
 1. **절대적으로 폭발적인 신입 (Absolute Standout)**: 전체 NFL 신입 풀(포지션 내)에서 절대적 운동능력·스냅 비중이 최상위권(상위 20% / 주전 상위 1/3)인 선수.
 2. **해당 시즌 코호트 상대 우위 (Cohort-Relative Standout)**: 매년 드래프트 풀(`draft_year`: 2023/2024/2025)의 수준이 다르므로, **같은 `draft_year × combine_position` 코호트 안에서 상대적으로 두드러지는 선수**.
 
+> ⚠️ 두 축 모두 "다른 선수와 비교한" **상대 라벨**입니다. 비교 기준(백분위 참조분포, 코호트 평균·표준편차, 상위 20% / 1/3 컷)은 **Train 선수에게서만 계산**하고 Test에는 그 기준을 적용만 합니다 (`RelativeTargetEncoder`, 3.5절). 510명 전체로 기준을 잡으면 Test 선수의 실제 성적이 Train 라벨의 컷과 순위에 섞여 들어가는 타깃 누수가 됩니다.
+
 ### 1.2 원본 데이터 정밀 검증을 통한 4가지 핵심 전략
 1. **`combine_tracking.csv`의 `dis` 오염 폐기 및 `(x, y)` 재계산**:
    - 전 연도(2023~2025) 검증 결과, 원본 `dis` 컬럼은 2프레임씩 복제되며 실제 `(x, y)` 이동거리의 **중앙값 53.2%**만 기록되는 오류가 확인되었습니다.
@@ -25,6 +27,7 @@
    - `draft_round`, `draft_overall_pick`, `draft_tier`는 드래프트 이후 정보이므로 **입력 피처 $X$에서 완전히 배제**합니다 (층화 분할 및 사후 버스트/스틸 오류 분석 전용).
    - 전체 $R^2$는 포지션 체격 차이가 만든 착시가 크므로, 모든 비교에서 **포지션 평균을 제거한 `within-position R²`**를 핵심 지표로 사용합니다.
    - 대치·스케일링·포지션/코호트 Z-score·드릴별 Z-score·Isolation Forest는 모두 **`scikit-learn` `Pipeline` 내부 Train 폴드에서만 `fit`**합니다.
+   - 같은 원칙을 **타깃(y)에도** 적용합니다. 포지션/코호트 백분위·코호트 Z·폭발 플래그·`starter_flag`·버스트/스틸 진단은 parquet에 저장하지 않고, Train(CV에서는 매 폴드의 Train 폴드)에서만 기준을 학습한 `RelativeTargetEncoder`로 그때그때 만듭니다. `check_relative_labels_ignore_holdout()`이 "Test 값을 마구 바꿔도 Train 라벨이 그대로인지"를 매 실행마다 검사합니다.
 
 ---
 
@@ -53,7 +56,7 @@ nfl-bdb2027/
 │   ├── eda.md                       # Stage 1 EDA 확정 사실 및 결정사항(D1~D10) 요약
 │   ├── tables/*.csv                 # Stage 1·Stage 4 비교 요약표 (Git 추적)
 │   └── figures/                     # 로컬 시각화 이미지 (Git 제외)
-└── requirements.txt                 # 로컬 가상환경(.venv) 패키지 의존성
+└── requirements.txt                 # 팀 공통 Python 3.11.9 기준 고정(==) 버전 의존성
 ```
 
 ### 파이썬 모듈 (`src/`) 상세 설명
@@ -61,16 +64,16 @@ nfl-bdb2027/
 |---|---|---|
 | `src/config.py` | 공통 | 로컬 `data/raw` 및 Colab Drive 자동 경로 탐색(`StopIteration` 방지), `SEED=42`, `TRIAL_KEY`, `SUB_POSITION_MAP`(8개 서브포지션), 글리치/잘림 임계값 단일 관리 |
 | `src/features/combine_fe.py` | 컴바인 단독 | `combine_tracking.csv` 정제(`dis` 폐기→`(x, y)` 재계산), 3축 가속 분해, 40야드 Samozino–Morin F-V 피팅, `draft_age`/물리 파생, 스킬 드릴 구제 피처 생성 → `combine_trials.parquet`, `combine_trial_flags.parquet`, `combine_forty_curves.parquet`, `combine_player_features.parquet`(510×81) |
-| `src/features/game_targets.py` | 경기 단독 | 2GB `game_tracking_2023~25.csv` 1회 청크 스트리밍(`games.csv` 시즌 조인, 루키 조기 필터링, 글리치 제거) + `player_play.csv` 집계 → `game_play_peaks.parquet`, `game_rookie_athletic.parquet`, `game_rookie_role.parquet` |
-| `src/features/preprocessing.py` | 컴바인+경기 통합 | T2+T3+T4 Left Join → `master_player_table.parquet`(510×144), `test_ids.csv` 생성, 누수 방지 커스텀 Transformer 4종, 선형/트리 듀얼 모드 `build_preprocessor()`, 5×5 층화 CV 비교 및 PCA/Lasso 점검 |
+| `src/features/game_targets.py` | 경기 단독 | 2GB `game_tracking_2023~25.csv` 1회 청크 스트리밍(`games.csv` 시즌 조인, 루키 조기 필터링, 글리치 제거) + `player_play.csv` 집계 → `game_play_peaks.parquet`, `game_rookie_athletic.parquet`, `game_rookie_role.parquet` (**원값 타깃만 저장**). 상대 라벨은 `RelativeTargetEncoder`(Train 전용 `fit`)로 생성하고 `check_relative_labels_ignore_holdout()`으로 누수 검사 |
+| `src/features/preprocessing.py` | 컴바인+경기 통합 | T2+T3+T4 Left Join → `master_player_table.parquet`(510×123), `test_ids.csv` 생성, 누수 방지 커스텀 Transformer 4종, 선형/트리 듀얼 모드 `build_preprocessor()`, 5×5 층화 CV **쌍대 비교**(기준 대비 Δ·승수·보정 SE·판정) 및 PCA/Lasso 점검 |
 
 ### 노트북 (`notebooks/`) 상세 설명
 - **`00_local_setup.ipynb`**: 로컬(`.venv`)과 Colab 양쪽에서 `src/config.py` 탐색, `data/raw` 9개 CSV 용량 확인, `pyarrow`/`scikit-learn` 동작 점검.
 - **`01_eda_combine.ipynb`**: 컴바인 포지션별 결측률·분포·전체 vs 그룹 내 상관(교란 검증), `event_id` 포함 트라이얼 키(`D1`), 분위수 잘림 오탐(`D7`) 도출.
 - **`01_eda_game.ipynb`**: `game_id[:4]` 연도 함정(`D3`), 2GB 1회 스트리밍, 키 정합성(510→497→492), `player_play` 채움률 vs TRUE 비율, `starter_flag` 미리보기.
 - **`02_combine_preprocessing_fe.ipynb`**: `[데이터 범위 / 작업 단계 / 목적 / 확인 결과]` 표준 형식으로 Stage 2 전처리·생체역학 피처 추출을 단계별 실행·확인.
-- **`03_game_targets.ipynb`**: 루키 경기 3축 운동학 타깃(REG+POST 및 PRE 민감도), 절대 폭발력 & 시즌 코호트 상대 우위 타깃, 사후 버스트/스틸 진단 분포 확인.
-- **`04_integrate_and_preprocess.ipynb`**: 마스터 조인, 80/20 테스트 봉인, 결측 대치 3종(`group_median`/`knn`/`mice`)·스케일러 3종(`standard`/`robust`/`yeo_johnson`)·피처 세트 4종(`FS-Trad`~`FS-Full`) 5×5 CV 비교 및 PCA·Lasso/ElasticNet 생존 피처 확인.
+- **`03_game_targets.ipynb`**: 루키 경기 3축 운동학 타깃 원값(REG+POST 및 PRE 민감도), 포지션별 정규시즌 스냅 분포, Test 102명을 봉인한 채 Train으로만 학습한 `RelativeTargetEncoder`로 절대/코호트 상대 라벨·사후 버스트/스틸 진단 생성 및 Test 섭동 누수 검사.
+- **`04_integrate_and_preprocess.ipynb`**: 마스터 조인, 80/20 테스트 봉인, 결측 대치 3종(`group_median`/`knn`/`mice`)·스케일러 3종(`standard`/`robust`/`yeo_johnson`)·피처 세트 4종(`FS-Trad`~`FS-Full`) 5×5 CV 쌍대 비교(기준 대비 Δ·승수·판정), 상대 타깃 누수 검사, PCA·Lasso/ElasticNet 생존 피처 확인.
 
 ---
 
@@ -126,37 +129,82 @@ $$v(t) = v_{\max}\left(1 - e^{-t/\tau}\right)$$
 
 ### 3.5 견고한 타깃 및 포지션 내부 평가 지표 (`game_targets.py`, `preprocessing.py`)
 - **견고한 속도 타깃**: 단일 최댓값 노이즈를 피하기 위해 루키 `REG+POST` 상위 5개 플레이 평균(`g_smax_top5mean`)을 사용하고, 저노출 편향을 완화하기 위해 신뢰도 가중치 $w_i = \dfrac{n_i}{n_i + 20}$ 및 프리시즌 포함 민감도 버전(`_with_pre`)을 함께 저장합니다.
+- **상대 타깃 (`RelativeTargetEncoder`, Train 전용 `fit`)**: 아래 라벨은 저장하지 않고, `fit(train)`이 학습한 기준으로 `transform`해서 만듭니다.
+  - `{col}_pos_pct`, `{col}_cohort_pct`: Train 참조분포 안에서의 평균 순위 백분위 $\big((lo + hi + 1)/2\big)/n$. Train 선수 자신에게는 기존 `rank(pct=True)`와 같은 값이 나옵니다.
+  - `{col}_cohort_z` $= (x - \mu_{\text{coh}}) / \sigma_{\text{coh}}$ ($\mu, \sigma$는 Train 코호트 통계). 코호트 표본이 5명 미만이면 포지션 통계로 대체합니다.
+  - `is_explosive_speed_abs` / `_cohort`: 해당 백분위 $\ge 0.8$ (상위 20%).
+  - `starter_flag` / `starter_flag_cohort`: Train 포지션(코호트) 정규시즌 스냅의 상위 1/3 컷 이상.
+  - `diag_draft_bust` (1~3R인데 스냅 < Train 포지션 중앙값), `diag_draft_steal` (4R 이후인데 주전): 사후 오류 분석 전용, 입력 피처로 쓰지 않음.
+  - 속도 계열 기준은 저노출(`low_exposure`) 선수를 빼고, 스냅 기준은 전원으로 학습합니다. CV에서는 **폴드마다 Train 폴드로 다시 `fit`**합니다.
 - **포지션 내부 잔차 $R^2$ (`r2_within_pos`)**: 실제값 $y$와 예측값 $\hat{y}$ 각각에서 소속 포지션 평균을 뺀 잔차 $(y - \bar{y}_p,\ \hat{y} - \bar{\hat{y}}_p)$ 사이의 $R^2$를 측정해 포지션 교란을 제거한 순수 변별력을 평가합니다.
 
 ---
 
-## 4. 전처리 · 피처추출 5×5 층화 CV 검증 요약 (Train 408명, Ridge)
+## 4. 전처리 · 피처추출 5×5 층화 CV 검증 요약 (Train 408명 중 평가 가능 273명, RidgeCV)
 
-테스트셋(`data/splits/test_ids.csv`, 102명)은 완전히 봉인한 상태에서, Train 내부 5×5 Repeated Stratified K-Fold CV로 검증한 결과입니다 (상세 표: `reports/tables/4_*.csv`).
+테스트셋(`data/splits/test_ids.csv`, 102명)은 완전히 봉인하고, Train 408명 중 경기 노출이 충분한(`low_exposure == False`) **273명**으로 5×5 Repeated Stratified K-Fold CV를 돌린 결과입니다. 요약표는 `reports/tables/4_*.csv`, 25개 폴드별 원점수는 `reports/tables/4_cv_fold_scores.csv`에 있습니다.
 
-### 4.1 피처 세트 점진적 효과 (절대 타깃 & 시즌 코호트 상대 타깃)
-| 타깃 | 피처 세트 | 전체 $R^2$ | **포지션 내부 $R^2$** | MAE |
-|---|---|---:|---:|---:|
-| 절대 폭발력 (`g_smax_top5mean`) | `FS-Trad` (전통 12개) | 0.7542 | 0.0483 | 0.5258 |
-| 절대 폭발력 (`g_smax_top5mean`) | `FS-Phys` (+물리·나이·결측플래그) | 0.7582 | 0.0654 | 0.5197 |
-| 절대 폭발력 (`g_smax_top5mean`) | `FS-Biomech` (+3축·F-V·스킬구제·드릴Z) | 0.7623 | **0.0901** | 0.5131 |
-| 절대 폭발력 (`g_smax_top5mean`) | `FS-Full` (+NFL NGS 점수) | 0.7710 | **0.1183** | 0.5025 |
-| 시즌 코호트 상대 (`*_cohort_z`) | `FS-Trad` → `FS-Phys` → `FS-Biomech` → `FS-Full` | 0.0518 → **0.1075** | 0.0736 → **0.1294** | 0.7306 → **0.7004** |
+### 4.0 판정 방법: 같은 폴드 위의 쌍대 비교
+모든 후보는 **똑같은 25개 폴드**에서 평가되므로, 평균끼리 비교하지 않고 폴드마다 차이 $d_i = \text{후보}_i - \text{기준}_i$ (지표: within-position $R^2$)를 구해 비교합니다.
+- **승수 (`wins`)**: 25개 폴드 중 후보가 기준보다 높았던 폴드 수.
+- **보정 표준오차 (`delta_se_corrected`)**: 반복 K-Fold의 폴드들은 학습 데이터를 공유하므로 서로 독립이 아닙니다. 그래서 단순 $\sigma_d/\sqrt{J}$ 대신 Nadeau–Bengio 보정을 씁니다.
+  $$\widehat{SE}_{\text{corr}} = \sqrt{\left(\frac{1}{J} + \frac{n_{\text{test}}}{n_{\text{train}}}\right)\hat\sigma_d^{2}}, \qquad J = 25,\ \frac{n_{\text{test}}}{n_{\text{train}}} = \frac{1}{4}$$
+- **판정 (`verdict`)**: $\bar d > 2\,\widehat{SE}$ → `우위`, $\bar d < -2\,\widehat{SE}$ → `열위`, 그 사이 → `차이 없음`. 기준 행은 `기준`.
 
-### 4.2 결측 대치 · 스케일러 비교 (`FS-Biomech`, `g_smax_top5mean`)
-- **결측 대치**: **`knn` (within-pos $R^2 = 0.1046$, MAE `0.5057`)** > `group_median` (`0.0901`) ≈ `mice` (`0.0899`)
-- **스케일러**: **`yeo_johnson` (within-pos $R^2 = 0.1087$, MAE `0.5050`)** > `standard` (`0.1034`) > `robust` (`0.0901`)
-- **PCA / 정규화 점검**: 총 107개 피처 중 PC 13개로 80%, PC 20개로 90% 분산 설명; ElasticNet/Lasso 최상위 생존 피처는 `draft_age`, `zpos_skill_smax_max`, `zcoh_ten_yd_split`, `zcoh_skill_smax_max`, `zpos_forty`, `drill_z_composite`, `speed_score` 순으로 **새로 발굴한 나이·스킬 드릴 구제·코호트 Z-score 피처가 최상위권을 차지**했습니다.
+### 4.1 피처 세트 (기준 `FS-Trad`)
+| 타깃 | 피처 세트 | 전체 $R^2$ | 포지션 내부 $R^2$ (평균 ± 표준편차) | Δ vs FS-Trad | 보정 SE | 승수 | 판정 |
+|---|---|---:|---:|---:|---:|---:|---|
+| 절대 (`g_smax_top5mean`) | `FS-Trad` (전통 12개) | 0.7542 | 0.0483 ± 0.0811 | — | — | — | 기준 |
+| 절대 (`g_smax_top5mean`) | `FS-Phys` (+물리·나이·결측플래그) | 0.7582 | 0.0654 ± 0.1041 | +0.0171 | 0.0295 | 19/25 | 차이 없음 |
+| 절대 (`g_smax_top5mean`) | `FS-Biomech` (+3축·F-V·스킬구제·드릴Z) | 0.7623 | 0.0901 ± 0.1017 | +0.0418 | 0.0265 | 19/25 | 차이 없음 |
+| 절대 (`g_smax_top5mean`) | `FS-Full` (+NFL NGS 점수) | 0.7710 | 0.1183 ± 0.1088 | +0.0700 | 0.0415 | 21/25 | 차이 없음 |
+| 코호트 상대 (`g_smax_top5mean_cohort_z`) | `FS-Trad` | 0.0527 | 0.0647 ± 0.0400 | — | — | — | 기준 |
+| 코호트 상대 | `FS-Phys` | 0.0647 | 0.0748 ± 0.0517 | +0.0102 | 0.0155 | 19/25 | 차이 없음 |
+| 코호트 상대 | `FS-Biomech` | 0.0704 | 0.0822 ± 0.0642 | +0.0175 | 0.0176 | 22/25 | 차이 없음 |
+| 코호트 상대 | `FS-Full` | 0.1075 | 0.1195 ± 0.0781 | +0.0548 | 0.0282 | 22/25 | 차이 없음 |
+
+- 피처를 더할수록 평균은 올라가고 대부분의 폴드(19~22/25)에서 기준보다 높습니다. **방향은 일관되지만, 어느 것도 보정 SE의 2배를 넘지 못했습니다.** 이 표본(273명)으로는 "새 피처가 확실히 낫다"고 말할 수 없고, "개선 방향의 신호가 있다" 정도로만 해석합니다.
+- 포지션 내부 $R^2$ 자체가 0.05~0.12로 낮고, 폴드 간 표준편차가 평균과 비슷한 크기입니다. 전체 $R^2$(0.75~0.77)는 대부분 포지션 간 체격 차이에서 나옵니다.
+- 코호트 상대 타깃은 이제 폴드마다 Train 폴드 기준으로 라벨을 만들기 때문에, 510명 전체 기준으로 만들던 이전 버전(FS-Trad 0.0736, FS-Full 0.1294)보다 수치가 조금 낮습니다. 이전 수치에는 검증 폴드 정보가 라벨에 섞여 있었습니다.
+
+### 4.2 결측 대치 · 스케일러 (`FS-Biomech`, `g_smax_top5mean`)
+| 비교 | 후보 | 포지션 내부 $R^2$ | Δ vs 기준 | 보정 SE | 승수 | 판정 |
+|---|---|---:|---:|---:|---:|---|
+| 결측 대치 | `group_median` | 0.0901 | — | — | — | 기준 |
+| 결측 대치 | `knn` | 0.1046 | +0.0145 | 0.0138 | 20/25 | 차이 없음 |
+| 결측 대치 | `mice` | 0.0899 | −0.0002 | 0.0141 | 13/25 | 차이 없음 |
+| 스케일러 | `robust` | 0.0901 | — | — | — | 기준 |
+| 스케일러 | `standard` | 0.1034 | +0.0133 | 0.0112 | 19/25 | 차이 없음 |
+| 스케일러 | `yeo_johnson` | 0.1094 | +0.0193 | 0.0145 | 20/25 | 차이 없음 |
+
+- 세 대치법, 세 스케일러 사이에 **판정할 만한 차이가 없습니다.** 따라서 "최선"을 고르지 않고, `build_preprocessor()`의 선형 모드 기본값인 가장 단순한 조합(`group_median` + `robust`)을 기준으로 유지합니다. `knn`·`yeo_johnson`은 평균이 약간 높으므로 모델링 단계에서 후보로 남겨 둘 수 있습니다.
+
+### 4.3 PCA / 정규화 점검 (`FS-Biomech`, Train 273명, 타깃 `g_smax_top5mean_cohort_z`)
+- 총 107개 피처(이상치 점수 포함) 중 PC 13개로 80%, PC 20개로 90% 분산을 설명합니다.
+- Lasso는 8개, ElasticNet은 25개 피처를 남겼습니다. ElasticNet 계수 크기 상위는 `draft_age`, `drill_z_composite`, `zcoh_skill_smax_max`, `zcoh_ten_yd_split`, `zpos_skill_smax_max`, `zpos_forty`, `speed_score` 순입니다 (`4_top30_enet_lasso_features.csv`).
+- Lasso는 서로 상관된 피처 중 하나만 남기는 경향이 있어, "살아남음 = 중요함"으로 해석하지 않습니다. 탐색용 참고 자료입니다.
 
 ---
 
 ## 5. 실행 방법 (로컬 / Google Colab)
 
-### 로컬 환경 설정
+### 로컬 환경 설정 (팀 공통 Python 3.11.9)
+`requirements.txt`의 모든 패키지는 `==`로 고정되어 있습니다. 패키지를 추가할 때도 버전을 고정해서 적고 팀원에게 알려 주세요.
+
+**macOS (conda)**
 ```bash
-python -m venv .venv
-# Windows
+conda create -n nfl python=3.11.9 -y
+conda activate nfl
+python --version          # Python 3.11.9 확인
+pip install -r requirements.txt
+nbstripout --install      # 환경을 새로 만들었으면 반드시 다시 실행 (git 필터가 이 환경의 python 경로를 가리킴)
+```
+
+**Windows (venv, python.org 3.11.9 설치본)**
+```powershell
+py -3.11 -m venv .venv
 .venv\Scripts\activate
+python --version          # Python 3.11.9 확인
 pip install -r requirements.txt
 nbstripout --install
 ```
@@ -178,9 +226,10 @@ trials = pd.read_parquet(config.PROCESSED_FILES["combine_trials"])
 train_df, test_df = create_or_load_test_split(master)
 
 # 선형 계열 (Ridge / Lasso / ElasticNet)
+# 4.2절: 대치·스케일러 간 판정할 만한 차이가 없으므로 가장 단순한 기본 조합을 사용
 prep_linear = build_preprocessor(
     feature_set="FS-Biomech", mode="linear",
-    imputer="knn", scaler="yeo_johnson", trials_df=trials,
+    imputer="group_median", scaler="robust", trials_df=trials,
 )
 
 # 트리 계열 (XGBoost / CatBoost / LightGBM — 네이티브 NaN 보존)
@@ -188,4 +237,11 @@ prep_tree = build_preprocessor(
     feature_set="FS-Biomech", mode="tree",
     imputer="none", scaler="none", trials_df=trials,
 )
+
+# 상대 타깃(백분위·코호트 Z·폭발/주전 플래그)은 Train에서만 기준을 학습
+from src.features.game_targets import RelativeTargetEncoder
+enc = RelativeTargetEncoder().fit(train_df)
+train_y = enc.transform(train_df)["g_smax_top5mean_cohort_z"]
+test_y = enc.transform(test_df)["g_smax_top5mean_cohort_z"]
+# CV 안에서는 폴드마다 Train 폴드로 다시 fit 할 것 (preprocessing._relative_or_raw_target 참고)
 ```

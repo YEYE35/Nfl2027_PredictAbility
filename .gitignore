@@ -31,13 +31,14 @@ data/processed/
 *.tar.gz
 *.7z
 
-# 공유·재현을 위해 추적할 소용량 CSV 예외
+# 공유·재현을 위해 추적할 소용량 CSV 예외 (고정 테스트 분할만)
 !data/splits/*.csv
-!reports/tables/*.csv
 
 # ============================================================
-# 3. 리포트 산출물 (용량 큰 그래프 이미지는 제외, eda.md · tables CSV는 추적)
+# 3. 리포트 산출물 (코드로 재생성 가능한 표·그림은 제외, eda.md만 추적)
 # ============================================================
+reports/tables/*
+!reports/tables/.gitkeep
 reports/figures/*
 !reports/figures/.gitkeep
 

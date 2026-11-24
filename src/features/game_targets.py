@@ -3,15 +3,18 @@
 이 모듈은 `game_tracking_2023~2025.csv`(~2GB, 2,265만 행), `games.csv`, `players.csv`,
 `player_play.csv`를 읽어 아래 3개의 Parquet 산출물을 생성한다:
 1. game_play_peaks.parquet      : 루키 시즌 (경기, 플레이, 선수) 세그먼트별 3축 운동학 피크
-2. game_rookie_athletic.parquet : 선수별 루키 경기 운동능력 타깃 (REG+POST 주버전 + PRE 포함 민감도)
-                                  + 절대 폭발력 백분위 + 시즌 코호트(draft_year × position) 상대 지표
-3. game_rookie_role.parquet     : 선수별 루키 정규시즌 스냅·주전(starter_flag)·포지션별 NGS 생산성
-                                  + 사후 진단용 드래프트 버스트/스틸 메타 컬럼
+2. game_rookie_athletic.parquet : 선수별 루키 경기 운동능력 원본 타깃 (REG+POST 주버전 + PRE 포함 민감도)
+3. game_rookie_role.parquet     : 선수별 루키 정규시즌 스냅·경기 수·포지션별 NGS 생산성 원본 값
+
+상대 기준 라벨(포지션/시즌 코호트 백분위·Z-score, 폭발적 신입 플래그, starter_flag, 버스트/스틸 진단)은
+"다른 선수들의 값"으로 기준을 정하므로 Parquet에 저장하지 않는다. 반드시 `RelativeTargetEncoder`를
+Train 선수로만 `fit`한 뒤 Train/Valid/Test에 `transform`해서 만든다 (테스트셋 정답 누수 방지).
 
 절대 준수 규칙:
 - `season`은 절대로 `game_id[:4]`에서 자르지 않고 항상 `games.csv`를 조인해 부여한다 (D3).
 - 루키 시즌은 `season == draft_year`로 정의한다 (D4).
 - 경기 트래킹 3개 파일은 `usecols`, `int32`/`float32`, `chunksize=1_000_000` 1회 스트리밍 패스로 처리한다.
+- 상대 기준 라벨의 기준값(평균·표준편차·분위수 컷)은 Train 선수만으로 계산한다.
 """
 from __future__ import annotations
 
@@ -255,30 +258,228 @@ def _agg_athletic_slice(peaks_sub: pd.DataFrame, suffix: str = "") -> pd.DataFra
     return out
 
 
-def _add_abs_and_cohort_ranks(
-    df: pd.DataFrame,
-    target_cols: list[str],
-    valid_mask: pd.Series | None = None,
-) -> pd.DataFrame:
-    """절대 폭발력(포지션 전체 내 백분위) + 시즌 코호트 상대 우위(draft_year × position)를 추가한다."""
-    df = df.copy()
-    mask = pd.Series(True, index=df.index) if valid_mask is None else valid_mask.fillna(False)
+# =====================================================================
+# [데이터: 경기 단독] [단계: 상대 기준 라벨 — Train 전용 fit / transform]
+#   포지션·시즌 코호트 대비 상대 라벨은 "다른 선수들의 값"으로 기준(평균·표준편차·분위수 컷)을 정한다.
+#   510명 전체로 기준을 정하면 테스트 선수의 정답이 학습 라벨에 섞이므로(누수),
+#   기준값은 Train 선수만으로 fit 하고 Train/Valid/Test 에는 transform 만 적용한다.
+# =====================================================================
+RELATIVE_SPEED_COLS = ["g_smax_top5mean", "g_accel_tan_p99", "g_decel_tan_p99", "g_centripetal_p99"]
+RELATIVE_SNAP_COL = "rookie_snaps_reg"
+_REL_SUFFIXES = ("_pos_pct", "_cohort_pct", "_cohort_z")
+_REL_SPECIAL = {
+    "is_explosive_speed_abs": "g_smax_top5mean",
+    "is_explosive_speed_cohort": "g_smax_top5mean",
+    "starter_flag": RELATIVE_SNAP_COL,
+    "starter_flag_cohort": RELATIVE_SNAP_COL,
+    "diag_draft_bust": RELATIVE_SNAP_COL,
+    "diag_draft_steal": RELATIVE_SNAP_COL,
+}
 
-    for col in target_cols:
-        if col not in df.columns:
-            continue
-        # 유효 표본에서만 순위·Z-score 계산 (저노출 노이즈가 순위 오염 방지)
-        eff = df[col].where(mask)
-        # ① 절대 기준: 전체 풀의 같은 포지션 내 백분위 [0, 1]
-        df[f"{col}_pos_pct"] = eff.groupby(df["combine_position"]).rank(pct=True)
-        # ② 시즌 코호트 기준: 같은 draft_year × combine_position 내 백분위 및 Z-score
-        cohort_key = [df["draft_year"], df["combine_position"]]
-        df[f"{col}_cohort_pct"] = eff.groupby(cohort_key).rank(pct=True)
-        c_mean = eff.groupby(cohort_key).transform("mean")
-        c_std = eff.groupby(cohort_key).transform("std")
-        df[f"{col}_cohort_z"] = (eff - c_mean) / c_std.replace(0, np.nan)
 
-    return df
+def relative_label_base(label: str) -> str | None:
+    """상대 라벨 이름이면 그 라벨을 만드는 원본 컬럼명을, 아니면 None을 반환한다."""
+    if label in _REL_SPECIAL:
+        return _REL_SPECIAL[label]
+    for base in RELATIVE_SPEED_COLS + [RELATIVE_SNAP_COL]:
+        for suf in _REL_SUFFIXES:
+            if label == f"{base}{suf}":
+                return base
+    return None
+
+
+def _avg_rank_pct(ref_sorted: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """학습 분포(ref) 대비 x의 백분위. ref에 포함된 값은 pandas rank(pct=True, average)와 같은 값을 준다."""
+    out = np.full(len(x), np.nan, dtype=np.float64)
+    n = len(ref_sorted)
+    ok = np.isfinite(x)
+    if n == 0 or not ok.any():
+        return out
+    lo = np.searchsorted(ref_sorted, x[ok], side="left")
+    hi = np.searchsorted(ref_sorted, x[ok], side="right")
+    out[ok] = ((lo + hi + 1) / 2.0) / n
+    return out
+
+
+class RelativeTargetEncoder:
+    """상대 기준 라벨을 Train 통계로만 만드는 fit/transform 인코더.
+
+    fit(train_df)   : Train 선수만으로 포지션별·코호트(draft_year × position)별 기준값을 저장한다.
+                      - 속도·가속 라벨: 노출 충족(~low_exposure) 선수만 기준에 사용
+                      - 스냅 라벨    : 스냅 0인 선수 포함 전원 사용 (D9)
+                      - 코호트 표본이 min_group_size 미만이면 포지션 기준으로 대체
+    transform(df)   : 저장한 기준값으로 아래 컬럼을 추가한 DataFrame 사본을 반환한다.
+                      {col}_pos_pct, {col}_cohort_pct, {col}_cohort_z  (col = 속도 4종 + rookie_snaps_reg)
+                      is_explosive_speed_abs / _cohort, starter_flag / _cohort, diag_draft_bust / _steal
+    """
+
+    def __init__(
+        self,
+        speed_cols: list[str] | None = None,
+        snap_col: str = RELATIVE_SNAP_COL,
+        pos_col: str = "combine_position",
+        cohort_col: str = "draft_year",
+        min_group_size: int = 5,
+    ):
+        self.speed_cols = list(RELATIVE_SPEED_COLS if speed_cols is None else speed_cols)
+        self.snap_col = snap_col
+        self.pos_col = pos_col
+        self.cohort_col = cohort_col
+        self.min_group_size = min_group_size
+
+    # ---------------- fit ----------------
+    def _fit_col(self, df: pd.DataFrame, col: str, valid: pd.Series) -> dict:
+        vals = pd.to_numeric(df[col], errors="coerce").where(valid)
+        stats = {"pos": {}, "cohort": {}}
+        for pos, s in vals.groupby(df[self.pos_col]):
+            s = s.dropna().to_numpy(dtype=np.float64)
+            stats["pos"][pos] = {
+                "ref": np.sort(s),
+                "mean": float(s.mean()) if len(s) else np.nan,
+                "std": float(s.std(ddof=1)) if len(s) > 1 else np.nan,
+            }
+        for (dy, pos), s in vals.groupby([df[self.cohort_col], df[self.pos_col]]):
+            s = s.dropna().to_numpy(dtype=np.float64)
+            if len(s) >= self.min_group_size:
+                stats["cohort"][(dy, pos)] = {
+                    "ref": np.sort(s),
+                    "mean": float(s.mean()),
+                    "std": float(s.std(ddof=1)),
+                }
+        return stats
+
+    def fit(self, df: pd.DataFrame, y=None) -> "RelativeTargetEncoder":
+        valid_speed = (
+            ~df["low_exposure"].fillna(True).astype(bool)
+            if "low_exposure" in df.columns
+            else pd.Series(True, index=df.index)
+        )
+        all_rows = pd.Series(True, index=df.index)
+
+        self.stats_ = {}
+        for col in self.speed_cols:
+            if col in df.columns:
+                self.stats_[col] = self._fit_col(df, col, valid_speed)
+        if self.snap_col in df.columns:
+            self.stats_[self.snap_col] = self._fit_col(df, self.snap_col, all_rows)
+
+            # 주전 컷(상위 1/3)과 버스트 진단용 중앙값 — Train 분포에서만 계산
+            q = 1.0 - config.STARTER_TOP_FRACTION
+            snaps = pd.to_numeric(df[self.snap_col], errors="coerce")
+            self.starter_cut_pos_ = snaps.groupby(df[self.pos_col]).quantile(q).to_dict()
+            self.snap_median_pos_ = snaps.groupby(df[self.pos_col]).median().to_dict()
+            grp = snaps.groupby([df[self.cohort_col], df[self.pos_col]])
+            sizes = grp.size()
+            cut_c = grp.quantile(q)
+            self.starter_cut_cohort_ = {
+                k: float(v) for k, v in cut_c.items() if sizes.get(k, 0) >= self.min_group_size
+            }
+        self.n_fit_ = int(len(df))
+        return self
+
+    # ---------------- transform ----------------
+    def _lookup(self, stats: dict, pos, dy, use_cohort: bool) -> dict | None:
+        if use_cohort and (dy, pos) in stats["cohort"]:
+            return stats["cohort"][(dy, pos)]
+        return stats["pos"].get(pos)
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not hasattr(self, "stats_"):
+            raise RuntimeError("RelativeTargetEncoder: fit(train_df)를 먼저 호출하세요.")
+        out = df.copy()
+        pos_arr = df[self.pos_col].to_numpy()
+        dy_arr = df[self.cohort_col].to_numpy()
+        valid_speed = (
+            ~df["low_exposure"].fillna(True).astype(bool).to_numpy()
+            if "low_exposure" in df.columns
+            else np.ones(len(df), dtype=bool)
+        )
+        new_cols: dict[str, np.ndarray] = {}
+
+        for col, stats in self.stats_.items():
+            x = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float64)
+            if col in self.speed_cols:
+                x = np.where(valid_speed, x, np.nan)
+            pos_pct = np.full(len(df), np.nan)
+            coh_pct = np.full(len(df), np.nan)
+            coh_z = np.full(len(df), np.nan)
+            for key in set(zip(dy_arr, pos_arr)):
+                dy, pos = key
+                idx = np.where((dy_arr == dy) & (pos_arr == pos))[0]
+                p_st = self._lookup(stats, pos, dy, use_cohort=False)
+                c_st = self._lookup(stats, pos, dy, use_cohort=True)
+                if p_st is not None:
+                    pos_pct[idx] = _avg_rank_pct(p_st["ref"], x[idx])
+                if c_st is not None:
+                    coh_pct[idx] = _avg_rank_pct(c_st["ref"], x[idx])
+                    sd = c_st["std"]
+                    if np.isfinite(sd) and sd > 1e-9:
+                        coh_z[idx] = (x[idx] - c_st["mean"]) / sd
+            new_cols[f"{col}_pos_pct"] = pos_pct
+            new_cols[f"{col}_cohort_pct"] = coh_pct
+            new_cols[f"{col}_cohort_z"] = coh_z
+
+        # 폭발적 신입 플래그 (상위 EXPLOSIVE_TOP_FRACTION, 기준은 Train 백분위)
+        cut_pct = 1.0 - config.EXPLOSIVE_TOP_FRACTION
+        for name, src in (("is_explosive_speed_abs", "g_smax_top5mean_pos_pct"),
+                          ("is_explosive_speed_cohort", "g_smax_top5mean_cohort_pct")):
+            if src in new_cols:
+                p = new_cols[src]
+                new_cols[name] = np.where(np.isfinite(p), (p >= cut_pct).astype(float), np.nan)
+
+        # 주전 플래그 & 사후 진단 (Train 컷 / Train 중앙값 적용)
+        if self.snap_col in self.stats_:
+            snaps = pd.to_numeric(df[self.snap_col], errors="coerce").to_numpy(dtype=np.float64)
+            cut_p = np.array([self.starter_cut_pos_.get(p, np.nan) for p in pos_arr], dtype=np.float64)
+            cut_c = np.array(
+                [self.starter_cut_cohort_.get((d, p), self.starter_cut_pos_.get(p, np.nan))
+                 for d, p in zip(dy_arr, pos_arr)],
+                dtype=np.float64,
+            )
+            starter = (snaps >= cut_p).astype(np.int8)
+            new_cols["starter_flag"] = starter
+            new_cols["starter_flag_cohort"] = (snaps >= cut_c).astype(np.int8)
+            if "draft_tier" in df.columns:
+                tier = df["draft_tier"].astype(str).to_numpy()
+                med = np.array([self.snap_median_pos_.get(p, np.nan) for p in pos_arr], dtype=np.float64)
+                new_cols["diag_draft_bust"] = ((tier == "1-3R") & (snaps < med)).astype(np.int8)
+                new_cols["diag_draft_steal"] = ((tier != "1-3R") & (starter == 1)).astype(np.int8)
+
+        for name, arr in new_cols.items():
+            out[name] = arr
+        return out
+
+    def fit_transform(self, df: pd.DataFrame, y=None) -> pd.DataFrame:
+        return self.fit(df).transform(df)
+
+
+def check_relative_labels_ignore_holdout(
+    train_df: pd.DataFrame,
+    holdout_df: pd.DataFrame,
+    seed: int = config.SEED,
+) -> bool:
+    """교란 테스트: 홀드아웃(테스트) 선수의 원본 타깃을 무작위로 바꿔도 Train 라벨이 그대로인지 확인한다.
+
+    Train에 fit 한 인코더 → Train 라벨 A.
+    홀드아웃 원본 값을 섞은 뒤 같은 절차를 다시 실행 → Train 라벨 B.  A == B 이어야 한다.
+    (예전 방식처럼 510명 전체로 기준을 잡으면 이 테스트에서 A != B 가 된다.)
+    """
+    rng = np.random.default_rng(seed)
+    cols = [c for c in RELATIVE_SPEED_COLS + [RELATIVE_SNAP_COL] if c in holdout_df.columns]
+
+    def labels_for_train(hold: pd.DataFrame) -> pd.DataFrame:
+        enc = RelativeTargetEncoder().fit(train_df)
+        both = pd.concat([train_df, hold], ignore_index=True)
+        lab = enc.transform(both).iloc[: len(train_df)]
+        return lab[[c for c in lab.columns if relative_label_base(c) is not None]]
+
+    a = labels_for_train(holdout_df)
+    hold_perturbed = holdout_df.copy()
+    for c in cols:
+        hold_perturbed[c] = rng.permutation(hold_perturbed[c].to_numpy()) * rng.uniform(0.5, 1.5)
+    b = labels_for_train(hold_perturbed)
+    pd.testing.assert_frame_equal(a.reset_index(drop=True), b.reset_index(drop=True))
+    return True
 
 
 def build_rookie_athletic_targets(
@@ -298,26 +499,9 @@ def build_rookie_athletic_targets(
     ath["low_exposure"] = ath["g_n_plays"] < config.MIN_PLAYS_EXPOSURE
     ath["exposure_weight"] = ath["g_n_plays"] / (ath["g_n_plays"] + config.EXPOSURE_WEIGHT_K)
 
-    # 충분한 노출(>= MIN_PLAYS_EXPOSURE) 선수 기준으로 절대(포지션 전체) & 시즌 코호트 상대 지표 산출
+    # 상대 기준 라벨(백분위·코호트 Z·폭발적 신입 플래그)은 여기서 만들지 않는다.
+    # -> Train 선수로만 기준을 잡는 RelativeTargetEncoder 로 분할 이후 생성 (테스트 누수 방지)
     valid_expo = ~ath["low_exposure"]
-    ath = _add_abs_and_cohort_ranks(
-        ath,
-        target_cols=["g_smax_top5mean", "g_accel_tan_p99", "g_decel_tan_p99", "g_centripetal_p99"],
-        valid_mask=valid_expo,
-    )
-
-    # 폭발적 신입 이진 플래그 (상위 20%: 절대 기준 vs 해당 시즌 코호트 기준)
-    cut_pct = 1.0 - config.EXPLOSIVE_TOP_FRACTION
-    ath["is_explosive_speed_abs"] = np.where(
-        ath["g_smax_top5mean_pos_pct"].notna(),
-        (ath["g_smax_top5mean_pos_pct"] >= cut_pct).astype(float),
-        np.nan,
-    )
-    ath["is_explosive_speed_cohort"] = np.where(
-        ath["g_smax_top5mean_cohort_pct"].notna(),
-        (ath["g_smax_top5mean_cohort_pct"] >= cut_pct).astype(float),
-        np.nan,
-    )
 
     print(
         f"[확인된 결과] T3 루키 경기 운동능력 타깃 생성: {len(ath)}명 | "
@@ -361,24 +545,8 @@ def build_rookie_role_targets(
     role["rookie_snaps_reg_post"] = role["nfl_id"].map(rk_rp.groupby("nfl_id").size()).fillna(0).astype(int)
     role["rookie_snaps_all"] = role["nfl_id"].map(rk.groupby("nfl_id").size()).fillna(0).astype(int)
 
-    # ① 절대 기준 주전(starter_flag): 전체 포지션 그룹 내 정규시즌 스냅 상위 1/3 (D9)
-    q_cut = 1.0 - config.STARTER_TOP_FRACTION
-    pos_cut = role.groupby("combine_position")["rookie_snaps_reg"].transform(lambda s: s.quantile(q_cut))
-    role["starter_flag"] = (role["rookie_snaps_reg"] >= pos_cut).astype(np.int8)
-
-    # ② 시즌 코호트 기준 주전(starter_flag_cohort): 같은 draft_year × position 내 상위 1/3
-    cohort_cut = role.groupby(["draft_year", "combine_position"])["rookie_snaps_reg"].transform(
-        lambda s: s.quantile(q_cut)
-    )
-    role["starter_flag_cohort"] = (role["rookie_snaps_reg"] >= cohort_cut).astype(np.int8)
-
-    # 스냅의 절대 백분위 & 시즌 코호트 백분위/Z-score
-    role = _add_abs_and_cohort_ranks(role, target_cols=["rookie_snaps_reg"])
-
-    # 사후 오류 분석 전용 플래그 (드래프트 실패/버스트 vs 스틸 진단 — 입력 X로 절대 사용 금지!)
-    pos_med_snaps = role.groupby("combine_position")["rookie_snaps_reg"].transform("median")
-    role["diag_draft_bust"] = ((role["draft_tier"] == "1-3R") & (role["rookie_snaps_reg"] < pos_med_snaps)).astype(np.int8)
-    role["diag_draft_steal"] = ((role["draft_tier"] != "1-3R") & (role["starter_flag"] == 1)).astype(np.int8)
+    # starter_flag(상위 1/3, D9) · 스냅 백분위/코호트 Z · 버스트/스틸 진단은 여기서 만들지 않는다.
+    # -> 상위 1/3 컷과 중앙값을 Train 선수로만 정하는 RelativeTargetEncoder 로 분할 이후 생성
 
     # 포지션별 유효 NGS 생산성 지표 (REG+POST 기준, eda.md 3.5 TRUE 비율 근거)
     epa_avg = rk_rp.groupby("nfl_id")["expected_points_added"].mean().rename("avg_epa_on_field")
@@ -424,10 +592,10 @@ def build_rookie_role_targets(
     role = role.merge(db_agg, on="nfl_id", how="left")
 
     print(
-        f"[확인된 결과] T4 루키 역할·생산성 타깃 생성: {len(role)}명 | "
-        f"주전(전체상위1/3)={int(role['starter_flag'].sum())}명 | "
-        f"주전(코호트상위1/3)={int(role['starter_flag_cohort'].sum())}명 | "
-        f"사후진단 버스트={int(role['diag_draft_bust'].sum())}명 / 스틸={int(role['diag_draft_steal'].sum())}명"
+        f"[확인된 결과] T4 루키 역할·생산성 원본 값 생성: {len(role)}명 | "
+        f"정규시즌 스냅 1회 이상={int((role['rookie_snaps_reg'] > 0).sum())}명 | "
+        f"스냅 중앙값={role['rookie_snaps_reg'].median():.0f} "
+        f"(starter_flag 등 상대 라벨은 분할 후 RelativeTargetEncoder로 생성)"
     )
     return role
 
