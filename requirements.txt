@@ -1,29 +1,34 @@
 # ============================================================
-# NFL BDB 2027 기계학습 팀 프로젝트 — 라이브러리 버전 고정
+# NFL BDB 2027 기계학습 프로젝트 — 로컬 실행 환경 의존성
 #
-# 기준: Google Colab 런타임 2026.10 (Python 3.13)
-#   Colab 메뉴 → 런타임 → 런타임 유형 변경 → "Runtime Version" = 2026.10
-#   두 사람 모두 이 버전으로 고정하면 아래 패키지는 이미 설치되어 있으므로
-#   Colab에서는 pip install을 하지 않는다 (재설치 시 런타임 재시작·충돌 위험).
-#
-# 이 파일의 용도
-#   1) 보고서 1절 "실행 환경"의 근거 (config.print_versions() 출력과 대조)
-#   2) 로컬에서 재현할 때: python3.13 -m venv .venv && pip install -r requirements.txt
-#
-# 첫 실행 때 config.print_versions() 결과와 다르면 이 파일을 실제 값으로 수정할 것.
+# 설치 방법 (프로젝트 루트에서):
+#   python -m venv .venv
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
 # ============================================================
 
-# --- 핵심 (Colab 2026.10 기본 설치) ---
-numpy==2.1.3
-pandas==2.2.3
-scipy==1.16.3
-scikit-learn==1.6.1
-matplotlib==3.10.0
-seaborn==0.13.2
-pyarrow==23.0.1
-joblib==1.6.0
-tqdm==4.67.3
+# --- 핵심 데이터 처리 · 수치 연산 · ML ---
+numpy>=2.0,<3.0
+pandas>=2.2,<3.0
+scipy>=1.14,<2.0
+scikit-learn>=1.6,<2.0
+pyarrow>=18.0
+joblib>=1.4
+tqdm>=4.66
 
-# --- 개발 도구 (로컬 git 작업용, Colab에는 불필요) ---
-# 커밋 시 노트북 출력 자동 제거: 설치 후 저장소 루트에서 `nbstripout --install`
+# --- 시각화 ---
+matplotlib>=3.9
+seaborn>=0.13
+
+# --- Jupyter · 로컬 개발 도구 ---
+ipykernel>=6.29
 nbstripout>=0.8
+
+# --- 향후 모델링 · 해석 · 튜닝 단계 (필요 시 주석 해제 후 설치) ---
+# lightgbm>=4.5
+# xgboost>=2.1
+# catboost>=1.2
+# optuna>=4.0
+# shap>=0.46
+# statsmodels>=0.14
+# pandera>=0.20
