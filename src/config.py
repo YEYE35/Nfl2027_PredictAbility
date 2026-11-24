@@ -1,26 +1,48 @@
 """프로젝트 공용 설정: 로컬/Colab 겸용 경로 · 시드 · 도메인 상수 · 환경 점검.
 
-모든 노트북 첫 셀 (로컬 VS Code / Google Colab 공통, StopIteration 방지):
-    import os, sys
+모든 노트북 첫 셀 (로컬 VS Code / VS Code Colab 커널 / Colab 웹 공통, StopIteration 방지):
+    import importlib.util, os, sys
     from pathlib import Path
 
+    # 필요 시 직접 경로 지정:
+    # os.environ["NFL_PROJECT_ROOT"] = "/content/drive/MyDrive/nfl-bdb2027"
+    # os.environ["NFL_DATA_DIR"] = "/content/drive/MyDrive/nfl-bdb2027-data"
+
+    def _is_colab_kernel() -> bool:
+        if (
+            "google.colab" in sys.modules
+            or "COLAB_RELEASE_TAG" in os.environ
+            or "COLAB_GPU" in os.environ
+        ):
+            return True
+        try:
+            return importlib.util.find_spec("google.colab") is not None
+        except (ModuleNotFoundError, ValueError):
+            return False
+
     def find_project_root() -> Path:
-        candidates = []
-        if "NFL_PROJECT_ROOT" in os.environ:
-            candidates.append(Path(os.environ["NFL_PROJECT_ROOT"]))
-        candidates.extend([Path.cwd(), *Path.cwd().parents, Path("/content/nfl-bdb2027")])
-        if "google.colab" in sys.modules or "COLAB_RELEASE_TAG" in os.environ:
-            from google.colab import drive
-            drive.mount("/content/drive", force_remount=False)
+        candidates: list[Path] = []
+        if env_root := os.environ.get("NFL_PROJECT_ROOT"):
+            candidates.append(Path(env_root).expanduser())
+        cwd = Path.cwd()
+        candidates.extend([cwd, *cwd.parents, cwd / "nfl-bdb2027"])
+        in_colab = _is_colab_kernel()
+        drive_root = Path("/content/drive")
+        mydrive = drive_root / "MyDrive"
+        if in_colab:
+            if not mydrive.exists():
+                from google.colab import drive
+                drive.mount(str(drive_root), force_remount=False)
             candidates.extend([
-                Path("/content/drive/MyDrive/nfl-bdb2027"),
-                Path("/content/drive/MyDrive/Colab Notebooks/nfl-bdb2027"),
+                Path("/content/nfl-bdb2027"),
+                mydrive / "nfl-bdb2027",
+                mydrive / "Colab Notebooks" / "nfl-bdb2027",
             ])
         for p in candidates:
             if (p / "src" / "config.py").exists():
                 return p.resolve()
         raise FileNotFoundError(
-            f"src/config.py를 찾지 못했습니다 (현재 cwd={Path.cwd()}). "
+            f"src/config.py를 찾지 못했습니다 (현재 cwd={cwd}, colab={in_colab}). "
             "환경변수 NFL_PROJECT_ROOT를 지정하거나 프로젝트 폴더 안에서 실행하세요."
         )
 
@@ -33,6 +55,7 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import platform
 import random
@@ -45,35 +68,80 @@ import numpy as np
 # ============================================================
 # 1. 실행 환경 및 경로 (로컬 + Colab 자동 호환)
 # ============================================================
-IN_COLAB: bool = "COLAB_RELEASE_TAG" in os.environ or "google.colab" in sys.modules
+def _detect_colab() -> bool:
+    if (
+        "COLAB_RELEASE_TAG" in os.environ
+        or "COLAB_GPU" in os.environ
+        or "google.colab" in sys.modules
+    ):
+        return True
+    try:
+        return importlib.util.find_spec("google.colab") is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+IN_COLAB: bool = _detect_colab()
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _has_raw_data(cand: Path) -> Path | None:
+    """후보 경로가 raw/combine_results.csv를 담고 있으면 DATA_DIR 반환."""
+    if (cand / "raw" / "combine_results.csv").exists():
+        return cand
+    if cand.name == "raw" and (cand / "combine_results.csv").exists():
+        return cand.parent
+    return None
 
 
 def _resolve_data_dir() -> Path:
     """데이터 폴더 탐색 우선순위:
     1) 환경변수 NFL_DATA_DIR
     2) 프로젝트 루트 아래 data/ (raw/combine_results.csv 존재 시 최우선)
-    3) Colab 실행 시 Google Drive 공유 폴더 자동 탐색
-    4) 기본값: PROJECT_ROOT / "data"
+    3) 프로젝트 상위 폴더의 형제 디렉터리 nfl-bdb2027-data/
+    4) Colab 실행 시 Google Drive 공유/하위 폴더 자동 탐색
+    5) 기본값: PROJECT_ROOT / "data"
     """
     if "NFL_DATA_DIR" in os.environ:
         return Path(os.environ["NFL_DATA_DIR"]).expanduser()
 
     local_data = PROJECT_ROOT / "data"
-    if (local_data / "raw" / "combine_results.csv").exists():
+    if _has_raw_data(local_data) is not None:
         return local_data
 
+    sibling_data = PROJECT_ROOT.parent / "nfl-bdb2027-data"
+    if _has_raw_data(sibling_data) is not None:
+        return sibling_data
+
     if IN_COLAB:
+        drive_root = Path("/content/drive")
+        mydrive = drive_root / "MyDrive"
         colab_candidates = [
-            Path("/content/drive/MyDrive/nfl-bdb2027/data"),
-            Path("/content/drive/MyDrive/nfl-bdb2027-data"),
-            Path("/content/drive/MyDrive/Colab Notebooks/nfl-bdb2027/data"),
+            mydrive / "nfl-bdb2027" / "data",
+            mydrive / "nfl-bdb2027-data",
+            mydrive / "Colab Notebooks" / "nfl-bdb2027" / "data",
+            mydrive / "Colab Notebooks" / "nfl-bdb2027-data",
+            Path("/content/nfl-bdb2027/data"),
+            Path("/content/nfl-bdb2027-data"),
         ]
         for cand in colab_candidates:
-            if (cand / "raw" / "combine_results.csv").exists():
-                return cand
-            if (cand / "combine_results.csv").exists():
-                return cand.parent
+            resolved = _has_raw_data(cand)
+            if resolved is not None:
+                return resolved
+
+        for base in (mydrive, drive_root / "Shareddrives"):
+            if not base.exists():
+                continue
+            try:
+                for d in base.iterdir():
+                    if not d.is_dir() or d.name.startswith("."):
+                        continue
+                    for cand in (d, d / "data", d / "nfl-bdb2027-data"):
+                        resolved = _has_raw_data(cand)
+                        if resolved is not None:
+                            return resolved
+            except OSError:
+                continue
 
     return local_data
 
